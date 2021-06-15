@@ -172,6 +172,7 @@ public class FunctionalTest {
   private static String bucketNameWithLock = getRandomName();
   private static boolean mintEnv = false;
   private static boolean isQuickTest = false;
+  private static boolean isRunOnFail = false;
   private static Path dataFile1Kb;
   private static Path dataFile6Mb;
   private static String endpoint;
@@ -425,6 +426,10 @@ public class FunctionalTest {
           e.toString() + " >>> " + Arrays.toString(e.getStackTrace()));
     } else {
       System.out.println("<FAILED> " + methodName + " " + ((args == null) ? "" : args));
+    }
+
+    if (isRunOnFail) {
+      return;
     }
 
     throw e;
@@ -3812,6 +3817,8 @@ public class FunctionalTest {
     replicationSrcBucket = System.getenv("MINIO_JAVA_TEST_REPLICATION_SRC_BUCKET");
     replicationRole = System.getenv("MINIO_JAVA_TEST_REPLICATION_ROLE");
     replicationBucketArn = System.getenv("MINIO_JAVA_TEST_REPLICATION_BUCKET_ARN");
+
+    isRunOnFail = System.getenv("RUN_ON_FAIL") != null && System.getenv("RUN_ON_FAIL").equals("1");
 
     Process minioProcess = null;
 
