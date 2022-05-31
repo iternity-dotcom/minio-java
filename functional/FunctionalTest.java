@@ -180,6 +180,7 @@ public class FunctionalTest {
   private static String secretKey;
   private static String region;
   private static boolean isSecureEndpoint = false;
+  private static boolean skipSseTests = false;
   private static String sqsArn = null;
   private static String replicationSrcBucket = null;
   private static String replicationRole = null;
@@ -948,7 +949,7 @@ public class FunctionalTest {
 
     testThreadedPutObject();
 
-    if (!isSecureEndpoint) {
+    if (!isSecureEndpoint || skipSseTests) {
       return;
     }
 
@@ -1098,7 +1099,7 @@ public class FunctionalTest {
     builder = builder.stream(new ContentInputStream(1024), 1024, -1);
     testStatObject("[SSE-S3]", builder.sse(sseS3).build(), stat);
 
-    if (!isSecureEndpoint) {
+    if (!isSecureEndpoint || skipSseTests) {
       mintIgnoredLog(methodName, "[SSE-C]", System.currentTimeMillis());
       return;
     }
@@ -1248,7 +1249,7 @@ public class FunctionalTest {
         0,
         getSha256Sum(cis, 0));
 
-    if (!isSecureEndpoint) {
+    if (!isSecureEndpoint || skipSseTests) {
       return;
     }
 
@@ -1318,7 +1319,7 @@ public class FunctionalTest {
             .filename(baseName + ".downloaded")
             .build());
 
-    if (!isSecureEndpoint) {
+    if (!isSecureEndpoint || skipSseTests) {
       return;
     }
 
@@ -1505,7 +1506,7 @@ public class FunctionalTest {
         sseS3,
         RemoveObjectArgs.builder().bucket(bucketName).object(getRandomName()).build());
 
-    if (!isSecureEndpoint) {
+    if (!isSecureEndpoint || skipSseTests) {
       mintIgnoredLog(methodName, "[SSE-C]", System.currentTimeMillis());
       mintIgnoredLog(methodName, "[SSE-KMS]", System.currentTimeMillis());
       return;
@@ -2064,7 +2065,7 @@ public class FunctionalTest {
             .build(),
         false);
 
-    if (!isSecureEndpoint) {
+    if (!isSecureEndpoint || skipSseTests) {
       mintIgnoredLog(methodName, "[SSE-C]", System.currentTimeMillis());
       mintIgnoredLog(methodName, "[SSE-KMS]", System.currentTimeMillis());
       return;
@@ -2202,7 +2203,7 @@ public class FunctionalTest {
       return;
     }
 
-    if (!isSecureEndpoint) {
+    if (!isSecureEndpoint || skipSseTests) {
       return;
     }
 
@@ -2273,7 +2274,7 @@ public class FunctionalTest {
         createdObjects.add(response);
         object6Mb = response.object();
 
-        if (isSecureEndpoint) {
+        if (isSecureEndpoint || skipSseTests) {
           response =
               client.putObject(
                   PutObjectArgs.builder().bucket(bucketName).object(getRandomName()).stream(
@@ -3819,6 +3820,7 @@ public class FunctionalTest {
     replicationBucketArn = System.getenv("MINIO_JAVA_TEST_REPLICATION_BUCKET_ARN");
 
     isRunOnFail = System.getenv("RUN_ON_FAIL") != null && System.getenv("RUN_ON_FAIL").equals("1");
+    skipSseTests = System.getenv("SKIP_SSE_TESTS") != null && System.getenv("SKIP_SSE_TESTS").equals("1");
 
     Process minioProcess = null;
 
