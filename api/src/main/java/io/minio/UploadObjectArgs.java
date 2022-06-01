@@ -16,12 +16,12 @@
 
 package io.minio;
 
-import com.google.common.base.Objects;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.Objects;
 
-/** Argument class of {@link MinioClient#uploadObject}. */
+/** Argument class of {@link MinioAsyncClient#uploadObject} and {@link MinioClient#uploadObject}. */
 public class UploadObjectArgs extends PutObjectBaseArgs {
   private String filename;
 
@@ -64,25 +64,23 @@ public class UploadObjectArgs extends PutObjectBaseArgs {
       }
     }
 
-    public Builder filename(String filename) throws IOException {
+    public Builder filename(String filename, long partSize) throws IOException {
       validateFilename(filename);
       final long objectSize = Files.size(Paths.get(filename));
-      if (objectSize > MAX_OBJECT_SIZE) {
-        throw new IllegalArgumentException(
-            "object size " + objectSize + " is not supported; maximum allowed 5TiB");
-      }
 
-      double pSize = Math.ceil((double) objectSize / MAX_MULTIPART_COUNT);
-      pSize = Math.ceil(pSize / MIN_MULTIPART_SIZE) * MIN_MULTIPART_SIZE;
-
-      final long partSize = (long) pSize;
-      final int partCount = (pSize > 0) ? (int) Math.ceil(objectSize / pSize) : 1;
+      long[] partinfo = getPartInfo(objectSize, partSize);
+      final long pSize = partinfo[0];
+      final int partCount = (int) partinfo[1];
 
       operations.add(args -> args.filename = filename);
       operations.add(args -> args.objectSize = objectSize);
-      operations.add(args -> args.partSize = partSize);
+      operations.add(args -> args.partSize = pSize);
       operations.add(args -> args.partCount = partCount);
       return this;
+    }
+
+    public Builder filename(String filename) throws IOException {
+      return this.filename(filename, 0);
     }
 
     public Builder contentType(String contentType) {
@@ -98,11 +96,11 @@ public class UploadObjectArgs extends PutObjectBaseArgs {
     if (!(o instanceof UploadObjectArgs)) return false;
     if (!super.equals(o)) return false;
     UploadObjectArgs that = (UploadObjectArgs) o;
-    return Objects.equal(filename, that.filename);
+    return Objects.equals(filename, that.filename);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hashCode(super.hashCode(), filename);
+    return Objects.hash(super.hashCode(), filename);
   }
 }

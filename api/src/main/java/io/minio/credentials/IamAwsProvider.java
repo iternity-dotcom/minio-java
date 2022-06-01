@@ -20,6 +20,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import io.minio.messages.ResponseDate;
 import java.io.IOException;
 import java.net.InetAddress;
@@ -35,6 +36,7 @@ import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Protocol;
 import okhttp3.Request;
+import okhttp3.RequestBody;
 import okhttp3.Response;
 
 /**
@@ -60,9 +62,11 @@ public class IamAwsProvider extends EnvironmentProvider {
         (customHttpClient != null)
             ? customHttpClient
             : new OkHttpClient().newBuilder().protocols(Arrays.asList(Protocol.HTTP_1_1)).build();
-    this.mapper = new ObjectMapper();
-    this.mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-    this.mapper.configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true);
+    this.mapper =
+        JsonMapper.builder()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+            .configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
+            .build();
   }
 
   private void checkLoopbackHost(HttpUrl url) {
@@ -143,7 +147,7 @@ public class IamAwsProvider extends EnvironmentProvider {
     Request request =
         new Request.Builder()
             .url(url)
-            .method("PUT", null)
+            .method("PUT", RequestBody.create(new byte[] {}, null))
             .header("X-aws-ec2-metadata-token-ttl-seconds", "21600")
             .build();
     try (Response response = httpClient.newCall(request).execute()) {

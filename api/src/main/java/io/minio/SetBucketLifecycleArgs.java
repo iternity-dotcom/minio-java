@@ -16,10 +16,13 @@
 
 package io.minio;
 
-import com.google.common.base.Objects;
 import io.minio.messages.LifecycleConfiguration;
+import java.util.Objects;
 
-/** Argument class of {@link MinioClient#setBucketLifecycle}. */
+/**
+ * Argument class of {@link MinioAsyncClient#setBucketLifecycle} and {@link
+ * MinioClient#setBucketLifecycle}.
+ */
 public class SetBucketLifecycleArgs extends BucketArgs {
   private LifecycleConfiguration config;
 
@@ -55,11 +58,11 @@ public class SetBucketLifecycleArgs extends BucketArgs {
     if (!(o instanceof SetBucketLifecycleArgs)) return false;
     if (!super.equals(o)) return false;
     SetBucketLifecycleArgs that = (SetBucketLifecycleArgs) o;
-    return Objects.equal(config, that.config);
+    return Objects.equals(config, that.config);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hashCode(super.hashCode(), config);
+    return Objects.hash(super.hashCode(), config);
   }
 }

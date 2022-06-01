@@ -45,7 +45,7 @@ MinioClient minioClient =
 | [`makeBucket`](#makeBucket)                                       | [`setObjectTags`](#setObjectTags)                       |
 | [`removeBucket`](#removeBucket)                                   | [`statObject`](#statObject)                             |
 | [`setBucketEncryption`](#setBucketEncryption)                     | [`uploadObject`](#uploadObject)                         |
-| [`setBucketLifecycle`](#setBucketLifecycle)                       |                                                         |
+| [`setBucketLifecycle`](#setBucketLifecycle)                       | [`uploadSnowballObjects`](#uploadSnowballObjects)       |
 | [`setBucketNotification`](#setBucketNotification)                 |                                                         |
 | [`setBucketPolicy`](#setBucketPolicy)                             |                                                         |
 | [`setBucketReplication`](#setBucketReplication)                   |                                                         |
@@ -244,7 +244,7 @@ __Parameters__
 __Example__
 ```java
 // Check whether 'my-bucketname' exists or not.
-boolean found = 
+boolean found =
   minioClient.bucketExists(BucketExistsArgs.builder().bucket("my-bucketname").build());
 if (found) {
   System.out.println("my-bucketname exists");
@@ -1037,7 +1037,11 @@ minioClient.copyObject(
     CopyObjectArgs.builder()
         .bucket("my-bucketname")
         .object("my-objectname")
-        .srcBucket("my-source-bucketname")
+        .source(
+            CopySource.builder()
+                .bucket("my-source-bucketname")
+                .object("my-objectname")
+                .build())
         .build());
 
 // Create object "my-objectname" in bucket "my-bucketname" by copying from object
@@ -1046,18 +1050,53 @@ minioClient.copyObject(
     CopyObjectArgs.builder()
         .bucket("my-bucketname")
         .object("my-objectname")
-        .srcBucket("my-source-bucketname")
-        .srcObject("my-source-objectname")
+        .source(
+            CopySource.builder()
+                .bucket("my-source-bucketname")
+                .object("my-source-objectname")
+                .build())
         .build());
 
-// Create object "my-objectname" in bucket "my-bucketname" with server-side encryption by
-// copying from object "my-objectname" in bucket "my-source-bucketname".
+// Create object "my-objectname" in bucket "my-bucketname" with SSE-KMS server-side
+// encryption by copying from object "my-objectname" in bucket "my-source-bucketname".
 minioClient.copyObject(
     CopyObjectArgs.builder()
         .bucket("my-bucketname")
         .object("my-objectname")
-        .srcBucket("my-source-bucketname")
-        .sse(sse)
+        .source(
+            CopySource.builder()
+                .bucket("my-source-bucketname")
+                .object("my-objectname")
+                .build())
+        .sse(sseKms) // Replace with actual key.
+        .build());
+
+// Create object "my-objectname" in bucket "my-bucketname" with SSE-S3 server-side
+// encryption by copying from object "my-objectname" in bucket "my-source-bucketname".
+minioClient.copyObject(
+    CopyObjectArgs.builder()
+        .bucket("my-bucketname")
+        .object("my-objectname")
+        .source(
+            CopySource.builder()
+                .bucket("my-source-bucketname")
+                .object("my-objectname")
+                .build())
+        .sse(sseS3) // Replace with actual key.
+        .build());
+
+// Create object "my-objectname" in bucket "my-bucketname" with SSE-C server-side encryption
+// by copying from object "my-objectname" in bucket "my-source-bucketname".
+minioClient.copyObject(
+    CopyObjectArgs.builder()
+        .bucket("my-bucketname")
+        .object("my-objectname")
+        .source(
+            CopySource.builder()
+                .bucket("my-source-bucketname")
+                .object("my-objectname")
+                .build())
+        .sse(ssec) // Replace with actual key.
         .build());
 
 // Create object "my-objectname" in bucket "my-bucketname" by copying from SSE-C encrypted
@@ -1066,20 +1105,27 @@ minioClient.copyObject(
     CopyObjectArgs.builder()
         .bucket("my-bucketname")
         .object("my-objectname")
-        .srcBucket("my-source-bucketname")
-        .srcObject("my-source-objectname")
-        .srcSsec(ssec)
+        .source(
+            CopySource.builder()
+                .bucket("my-source-bucketname")
+                .object("my-source-objectname")
+                .ssec(ssec) // Replace with actual key.
+                .build())
         .build());
 
-// Create object "my-objectname" in bucket "my-bucketname" with custom headers by copying from
-// object "my-objectname" in bucket "my-source-bucketname" using conditions.
+// Create object "my-objectname" in bucket "my-bucketname" with custom headers conditionally
+// by copying from object "my-objectname" in bucket "my-source-bucketname".
 minioClient.copyObject(
     CopyObjectArgs.builder()
         .bucket("my-bucketname")
         .object("my-objectname")
-        .srcBucket("my-source-bucketname")
-        .headers(headers)
-        .srcMatchETag(etag)
+        .source(
+            CopySource.builder()
+                .bucket("my-source-bucketname")
+                .object("my-objectname")
+                .matchETag(etag) // Replace with actual etag.
+                .build())
+        .headers(headers) // Replace with actual headers.
         .build());
 ```
 
@@ -1130,7 +1176,7 @@ minioClient.disableObjectLegalHold(
 Enables legal hold on an object.
 
  __Parameters__
- 
+
 | Parameter      | Type                          | Description  |
 |:---------------|:------------------------------|:-------------|
 | ``args``       | _[EnableObjectLegalHoldArgs]_ | Argumments.  |
@@ -1234,7 +1280,7 @@ minioClient.downloadObject(
   DownloadObjectArgs.builder()
   .bucket("my-bucketname")
   .object("my-objectname")
-  .fileName("my-object-file")
+  .filename("my-object-file")
   .build());
 
 // Download server-side encrypted object in bucket to given file name
@@ -1243,7 +1289,7 @@ minioClient.downloadObject(
   .bucket("my-bucketname")
   .object("my-objectname")
   .ssec(ssec)
-  .fileName("my-object-file")
+  .filename("my-object-file")
   .build());
 ```
 
@@ -1254,7 +1300,7 @@ minioClient.downloadObject(
 Gets retention configuration of an object.
 
  __Parameters__
- 
+
 | Parameter      | Type                       | Description   |
 |:---------------|:---------------------------|:--------------|
 | ``args``       | _[GetObjectRetentionArgs]_ | Arguments.    |
@@ -1304,7 +1350,7 @@ Tags tags = minioClient.getObjectTags(
 
 Gets presigned URL of an object for HTTP method, expiry time and custom request parameters.
 
- __Parameters__ 
+ __Parameters__
 | Parameter   | Type                           | Description  |
 |:------------|:-------------------------------|:-------------|
 | ``args``    | _[GetPresignedObjectUrlArgs]_  | Arguments.   |
@@ -1315,35 +1361,14 @@ Gets presigned URL of an object for HTTP method, expiry time and custom request 
 
  __Example__
  ```java
-// Get presigned URL of an object for HTTP method, expiry time and custom request parameters.
-String url =
-    minioClient.getPresignedObjectUrl(
-        GetPresignedObjectUrlArgs.builder()
-            .method(Method.DELETE)
-            .bucket("my-bucketname")
-            .object("my-objectname")
-            .expiry(24 * 60 * 60)
-            .build());
-System.out.println(url);
-
-// Get presigned URL string to upload 'my-objectname' in 'my-bucketname' 
-// with response-content-type as application/json and life time as one day.
+// Get presigned URL string to download 'my-objectname' in 'my-bucketname'
+// with an expiration of 2 hours.
+//
+// Additionally also add 'response-content-type' to dynamically set content-type
+// for the server response.
 Map<String, String> reqParams = new HashMap<String, String>();
 reqParams.put("response-content-type", "application/json");
 
-String url =
-    minioClient.getPresignedObjectUrl(
-        GetPresignedObjectUrlArgs.builder()
-            .method(Method.PUT)
-            .bucket("my-bucketname")
-            .object("my-objectname")
-            .expiry(1, TimeUnit.DAYS)
-            .extraQueryParams(reqParams)
-            .build());
-System.out.println(url);
-
-// Get presigned URL string to download 'my-objectname' in 'my-bucketname' and its life time
-// is 2 hours.
 String url =
     minioClient.getPresignedObjectUrl(
         GetPresignedObjectUrlArgs.builder()
@@ -1351,6 +1376,38 @@ String url =
             .bucket("my-bucketname")
             .object("my-objectname")
             .expiry(2, TimeUnit.HOURS)
+            .extraQueryParams(reqParams)
+            .build());
+System.out.println(url);
+
+// Get presigned URL string to upload 'my-objectname' in 'my-bucketname'
+// with an expiration of 1 day.
+String url =
+    minioClient.getPresignedObjectUrl(
+        GetPresignedObjectUrlArgs.builder()
+            .method(Method.PUT)
+            .bucket("my-bucketname")
+            .object("my-objectname")
+            .expiry(1, TimeUnit.DAYS)
+            .build());
+System.out.println(url);
+
+// Get presigned URL string to lookup metadata for 'my-objectname' in 'my-bucketname'
+// with an expiration of 2 hours.
+//
+// Additionally also add 'response-content-type' to dynamically set content-type
+// for the server metadata response.
+Map<String, String> reqParams = new HashMap<String, String>();
+reqParams.put("response-content-type", "application/json");
+
+String url =
+    minioClient.getPresignedObjectUrl(
+        GetPresignedObjectUrlArgs.builder()
+            .method(Method.HEAD)
+            .bucket("my-bucketname")
+            .object("my-objectname")
+            .expiry(2, TimeUnit.HOURS)
+            .extraQueryParams(reqParams)
             .build());
 System.out.println(url);
 ```
@@ -1532,6 +1589,36 @@ minioClient.uploadObject(
         .build());
 ```
 
+<a name="uploadSnowballObjects"></a>
+### uploadSnowballObjects(UploadSnowballObjectsArgs args)
+`public void uploadSnowballObjects(UploadSnowballObjectsArgs args)` _[[Javadoc]](http://minio.github.io/minio-java/io/minio/MinioClient.html#uploadSnowballObjects-io.minio.UploadSnowballObjectsArgs-)_
+
+Uploads multiple objects in a single put call. It is done by creating intermediate TAR file optionally compressed which is uploaded to S3 service.
+
+__Parameters__
+| Parameter | Type                          | Description |
+|:----------|:------------------------------|:------------|
+| ``args``  | _[UploadSnowballObjectsArgs]_ | Arguments.  |
+
+__Example__
+```java
+List<SnowballObject> objects = new ArrayList<SnowballObject>();
+objects.add(
+    new SnowballObject(
+        "my-object-one",
+        new ByteArrayInputStream("hello".getBytes(StandardCharsets.UTF_8)),
+        5,
+        null));
+objects.add(
+    new SnowballObject(
+        "my-object-two",
+        new ByteArrayInputStream("java".getBytes(StandardCharsets.UTF_8)),
+        4,
+        null));
+minioClient.uploadSnowballObjects(
+    UploadSnowballObjectsArgs.builder().bucket("my-bucketname").objects(objects).build());
+```
+
 <a name="removeObject"></a>
 ### removeObject(RemoveObjectArgs args)
 `public void removeObject(RemoveObjectArgs args)` _[[Javadoc]](http://minio.github.io/minio-java/io/minio/MinioClient.html#removeObject-io.minio.RemoveObjectArgs-)_
@@ -1649,7 +1736,7 @@ stream.close();
 Sets retention configuration to an object.
 
  __Parameters__
- 
+
 | Parameter        | Type                       | Description  |
 |:-----------------|:---------------------------|:-------------|
 | ``args``         | _[SetObjectRetentionArgs]_ | Arguments.   |
@@ -1819,6 +1906,7 @@ ObjectStat objectStat =
 [CopyObjectArgs]: http://minio.github.io/minio-java/io/minio/CopyObjectArgs.html
 [PutObjectArgs]: http://minio.github.io/minio-java/io/minio/PutObjectArgs.html
 [UploadObjectArgs]: http://minio.github.io/minio-java/io/minio/UploadObjectArgs.html
+[UploadSnowballObjectsArgs]: http://minio.github.io/minio-java/io/minio/UploadSnowballObjectsArgs.html
 [ComposeObjectArgs]: http://minio.github.io/minio-java/io/minio/ComposeObjectArgs.html
 [ObjectWriteResponse]: http://minio.github.io/minio-java/io/minio/ObjectWriteResponse.html
 [ListBucketsArgs]: http://minio.github.io/minio-java/io/minio/ListBucketsArgs.html

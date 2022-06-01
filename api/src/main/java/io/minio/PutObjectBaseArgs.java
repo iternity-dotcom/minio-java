@@ -16,8 +16,8 @@
 
 package io.minio;
 
-import com.google.common.base.Objects;
 import java.io.IOException;
+import java.util.Objects;
 
 /** Base argument class for {@link PutObjectArgs} and {@link UploadObjectArgs}. */
 public abstract class PutObjectBaseArgs extends ObjectWriteArgs {
@@ -60,11 +60,66 @@ public abstract class PutObjectBaseArgs extends ObjectWriteArgs {
   @SuppressWarnings("unchecked") // Its safe to type cast to B as B is inherited by this class
   public abstract static class Builder<B extends Builder<B, A>, A extends PutObjectBaseArgs>
       extends ObjectWriteArgs.Builder<B, A> {
+    private void validateSizes(long objectSize, long partSize) {
+      if (partSize > 0) {
+        if (partSize < MIN_MULTIPART_SIZE) {
+          throw new IllegalArgumentException(
+              "part size " + partSize + " is not supported; minimum allowed 5MiB");
+        }
+
+        if (partSize > MAX_PART_SIZE) {
+          throw new IllegalArgumentException(
+              "part size " + partSize + " is not supported; maximum allowed 5GiB");
+        }
+      }
+
+      if (objectSize >= 0) {
+        if (objectSize > MAX_OBJECT_SIZE) {
+          throw new IllegalArgumentException(
+              "object size " + objectSize + " is not supported; maximum allowed 5TiB");
+        }
+      } else if (partSize <= 0) {
+        throw new IllegalArgumentException(
+            "valid part size must be provided when object size is unknown");
+      }
+    }
+
+    protected long[] getPartInfo(long objectSize, long partSize) {
+      validateSizes(objectSize, partSize);
+
+      if (objectSize < 0) return new long[] {partSize, -1};
+
+      if (partSize <= 0) {
+        // Calculate part size by multiple of MIN_MULTIPART_SIZE.
+        double dPartSize = Math.ceil((double) objectSize / MAX_MULTIPART_COUNT);
+        dPartSize = Math.ceil(dPartSize / MIN_MULTIPART_SIZE) * MIN_MULTIPART_SIZE;
+        partSize = (long) dPartSize;
+      }
+
+      if (partSize > objectSize) partSize = objectSize;
+      long partCount = partSize > 0 ? (long) Math.ceil((double) objectSize / partSize) : 1;
+      if (partCount > MAX_MULTIPART_COUNT) {
+        throw new IllegalArgumentException(
+            "object size "
+                + objectSize
+                + " and part size "
+                + partSize
+                + " make more than "
+                + MAX_MULTIPART_COUNT
+                + "parts for upload");
+      }
+
+      return new long[] {partSize, partCount};
+    }
+
     /**
      * Sets flag to control data preload of stream/file. When this flag is enabled, entire
      * part/object data is loaded into memory to enable connection retry on network failure in the
      * middle of upload.
+     *
+     * @deprecated As this behavior is enabled by default and cannot be turned off.
      */
+    @Deprecated
     public B preloadData(boolean preloadData) {
       operations.add(args -> args.preloadData = preloadData);
       return (B) this;
@@ -80,13 +135,13 @@ public abstract class PutObjectBaseArgs extends ObjectWriteArgs {
     return objectSize == that.objectSize
         && partSize == that.partSize
         && partCount == that.partCount
-        && Objects.equal(contentType, that.contentType)
+        && Objects.equals(contentType, that.contentType)
         && preloadData == that.preloadData;
   }
 
   @Override
   public int hashCode() {
-    return Objects.hashCode(
+    return Objects.hash(
         super.hashCode(), objectSize, partSize, partCount, contentType, preloadData);
   }
 }

@@ -16,10 +16,13 @@
 
 package io.minio;
 
-import com.google.common.base.Objects;
 import io.minio.messages.SseConfiguration;
+import java.util.Objects;
 
-/** Argument class of {@link MinioClient#setBucketEncryption}. */
+/**
+ * Argument class of {@link MinioAsyncClient#setBucketEncryption} and {@link
+ * MinioClient#setBucketEncryption}.
+ */
 public class SetBucketEncryptionArgs extends BucketArgs {
   private SseConfiguration config;
 
@@ -55,11 +58,11 @@ public class SetBucketEncryptionArgs extends BucketArgs {
     if (!(o instanceof SetBucketEncryptionArgs)) return false;
     if (!super.equals(o)) return false;
     SetBucketEncryptionArgs that = (SetBucketEncryptionArgs) o;
-    return Objects.equal(config, that.config);
+    return Objects.equals(config, that.config);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hashCode(super.hashCode(), config);
+    return Objects.hash(super.hashCode(), config);
   }
 }

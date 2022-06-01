@@ -16,9 +16,9 @@
 
 package io.minio;
 
-import com.google.common.base.Objects;
+import java.util.Objects;
 
-/** Argument class of {@link MinioClient#removeObject}. */
+/** Argument class of {@link MinioAsyncClient#removeObject} and {@link MinioClient#removeObject}. */
 public class RemoveObjectArgs extends ObjectVersionArgs {
   private boolean bypassGovernanceMode;
 
@@ -49,6 +49,6 @@ public class RemoveObjectArgs extends ObjectVersionArgs {
 
   @Override
   public int hashCode() {
-    return Objects.hashCode(super.hashCode(), bypassGovernanceMode);
+    return Objects.hash(super.hashCode(), bypassGovernanceMode);
   }
 }

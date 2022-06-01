@@ -1,6 +1,6 @@
 /*
  * MinIO Java SDK for Amazon S3 Compatible Cloud Storage,
- * (C) 2015-2020 MinIO, Inc.
+ * (C) 2015-2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -78,12 +78,16 @@ import io.minio.SetBucketVersioningArgs;
 import io.minio.SetObjectLockConfigurationArgs;
 import io.minio.SetObjectRetentionArgs;
 import io.minio.SetObjectTagsArgs;
+import io.minio.SnowballObject;
 import io.minio.StatObjectArgs;
 import io.minio.StatObjectResponse;
 import io.minio.Time;
 import io.minio.UploadObjectArgs;
+import io.minio.UploadSnowballObjectsArgs;
 import io.minio.Xml;
+import io.minio.admin.MinioAdminClient;
 import io.minio.errors.ErrorResponseException;
+import io.minio.http.HttpUtils;
 import io.minio.http.Method;
 import io.minio.messages.AndOperator;
 import io.minio.messages.Bucket;
@@ -129,6 +133,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.InvalidKeyException;
+import java.security.KeyManagementException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
@@ -167,7 +172,6 @@ public class FunctionalTest {
   private static final int MB = 1024 * 1024;
   private static final Random random = new Random(new SecureRandom().nextLong());
   private static final String customContentType = "application/javascript";
-  private static final String nullContentType = null;
   private static String bucketName = getRandomName();
   private static String bucketNameWithLock = getRandomName();
   private static boolean mintEnv = false;
@@ -176,6 +180,7 @@ public class FunctionalTest {
   private static Path dataFile1Kb;
   private static Path dataFile6Mb;
   private static String endpoint;
+  private static String endpointTLS;
   private static String accessKey;
   private static String secretKey;
   private static String region;
@@ -186,6 +191,7 @@ public class FunctionalTest {
   private static String replicationRole = null;
   private static String replicationBucketArn = null;
   private static MinioClient client = null;
+  private static TestMinioAdminClient adminClientTests;
 
   private static ServerSideEncryptionCustomerKey ssec = null;
   private static ServerSideEncryption sseS3 = new ServerSideEncryptionS3();
@@ -204,6 +210,18 @@ public class FunctionalTest {
       keyGen.init(256);
       ssec = new ServerSideEncryptionCustomerKey(keyGen.generateKey());
     } catch (InvalidKeyException | NoSuchAlgorithmException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public static OkHttpClient newHttpClient() {
+    try {
+      return HttpUtils.disableCertCheck(
+          HttpUtils.newDefaultHttpClient(
+              TimeUnit.MINUTES.toMillis(5),
+              TimeUnit.MINUTES.toMillis(5),
+              TimeUnit.MINUTES.toMillis(5)));
+    } catch (KeyManagementException | NoSuchAlgorithmException e) {
       throw new RuntimeException(e);
     }
   }
@@ -310,13 +328,7 @@ public class FunctionalTest {
   public static byte[] readObject(String urlString) throws Exception {
     Request.Builder requestBuilder = new Request.Builder();
     Request request = requestBuilder.url(HttpUrl.parse(urlString)).method("GET", null).build();
-    OkHttpClient transport =
-        new OkHttpClient()
-            .newBuilder()
-            .connectTimeout(20, TimeUnit.SECONDS)
-            .writeTimeout(20, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .build();
+    OkHttpClient transport = newHttpClient();
     Response response = transport.newCall(request).execute();
 
     try {
@@ -343,13 +355,7 @@ public class FunctionalTest {
             .method("PUT", RequestBody.create(dataBytes, null))
             .addHeader("x-amz-acl", "bucket-owner-full-control")
             .build();
-    OkHttpClient transport =
-        new OkHttpClient()
-            .newBuilder()
-            .connectTimeout(20, TimeUnit.SECONDS)
-            .writeTimeout(20, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .build();
+    OkHttpClient transport = newHttpClient();
     Response response = transport.newCall(request).execute();
 
     try {
@@ -409,7 +415,7 @@ public class FunctionalTest {
     }
   }
 
-  private static void handleException(String methodName, String args, long startTime, Exception e)
+  public static void handleException(String methodName, String args, long startTime, Exception e)
       throws Exception {
     if (e instanceof ErrorResponseException) {
       if (((ErrorResponseException) e).errorResponse().code().equals("NotImplemented")) {
@@ -425,6 +431,9 @@ public class FunctionalTest {
           startTime,
           null,
           e.toString() + " >>> " + Arrays.toString(e.getStackTrace()));
+      if (isRunOnFail) {
+        return;
+      }
     } else {
       System.out.println("<FAILED> " + methodName + " " + ((args == null) ? "" : args));
     }
@@ -1748,13 +1757,7 @@ public class FunctionalTest {
       // remove last two characters to get clean url string of bucket.
       urlString = urlString.substring(0, urlString.length() - 2);
       Request request = requestBuilder.url(urlString).post(multipartBuilder.build()).build();
-      OkHttpClient transport =
-          new OkHttpClient()
-              .newBuilder()
-              .connectTimeout(20, TimeUnit.SECONDS)
-              .writeTimeout(20, TimeUnit.SECONDS)
-              .readTimeout(20, TimeUnit.SECONDS)
-              .build();
+      OkHttpClient transport = newHttpClient();
       Response response = transport.newCall(request).execute();
       Assert.assertNotNull("no response from server", response);
 
@@ -3647,6 +3650,61 @@ public class FunctionalTest {
     }
   }
 
+  public static void testUploadSnowballObjects(String testTags, boolean compression)
+      throws Exception {
+    String methodName = "uploadSnowballObjects()";
+
+    long startTime = System.currentTimeMillis();
+    String objectName1 = getRandomName();
+    String objectName2 = getRandomName();
+    try {
+      try {
+        List<SnowballObject> objects = new LinkedList<SnowballObject>();
+        objects.add(
+            new SnowballObject(
+                objectName1,
+                new ByteArrayInputStream("hello".getBytes(StandardCharsets.UTF_8)),
+                5,
+                null));
+        objects.add(new SnowballObject(objectName2, createFile1Kb()));
+        client.uploadSnowballObjects(
+            UploadSnowballObjectsArgs.builder()
+                .bucket(bucketName)
+                .objects(objects)
+                .compression(compression)
+                .build());
+
+        StatObjectResponse stat =
+            client.statObject(
+                StatObjectArgs.builder().bucket(bucketName).object(objectName1).build());
+        Assert.assertEquals("object size: expected: 5, got: " + stat.size(), 5, stat.size());
+        stat =
+            client.statObject(
+                StatObjectArgs.builder().bucket(bucketName).object(objectName2).build());
+        Assert.assertEquals(
+            "object size: expected: " + KB + ", got: " + stat.size(), 1 * KB, stat.size());
+        mintSuccessLog(methodName, testTags, startTime);
+      } finally {
+        client.removeObject(
+            RemoveObjectArgs.builder().bucket(bucketName).object(objectName1).build());
+        client.removeObject(
+            RemoveObjectArgs.builder().bucket(bucketName).object(objectName2).build());
+      }
+    } catch (Exception e) {
+      handleException(methodName, testTags, startTime, e);
+    }
+  }
+
+  public static void uploadSnowballObjects() throws Exception {
+    String methodName = "uploadSnowballObjects()";
+    if (!mintEnv) {
+      System.out.println(methodName);
+    }
+
+    testUploadSnowballObjects("[no compression]", false);
+    testUploadSnowballObjects("[compression]", true);
+  }
+
   public static void runBucketTests() throws Exception {
     makeBucket();
     bucketExists();
@@ -3718,12 +3776,15 @@ public class FunctionalTest {
     getObjectTags();
     deleteObjectTags();
 
+    uploadSnowballObjects();
+
     teardown();
   }
 
   public static void runTests() throws Exception {
     runBucketTests();
     runObjectTests();
+    adminClientTests.runAdminTests();
   }
 
   public static boolean downloadMinio() throws IOException {
@@ -3748,13 +3809,7 @@ public class FunctionalTest {
 
     Request.Builder requestBuilder = new Request.Builder();
     Request request = requestBuilder.url(HttpUrl.parse(url)).method("GET", null).build();
-    OkHttpClient transport =
-        new OkHttpClient()
-            .newBuilder()
-            .connectTimeout(20, TimeUnit.SECONDS)
-            .writeTimeout(20, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .build();
+    OkHttpClient transport = newHttpClient();
     Response response = transport.newCall(request).execute();
 
     try {
@@ -3778,14 +3833,27 @@ public class FunctionalTest {
     return true;
   }
 
-  public static Process runMinio() throws Exception {
+  public static Process runMinio(boolean tls) throws Exception {
     File binaryPath = new File(new File(System.getProperty("user.dir")), MINIO_BINARY);
-    ProcessBuilder pb =
-        new ProcessBuilder(binaryPath.getPath(), "server", "--config-dir", ".cfg", ".d{1...4}");
+    ProcessBuilder pb;
+    if (tls) {
+      pb =
+          new ProcessBuilder(
+              binaryPath.getPath(),
+              "server",
+              "--address",
+              ":9001",
+              "--config-dir",
+              ".cfg",
+              ".d{1...4}");
+    } else {
+      pb = new ProcessBuilder(binaryPath.getPath(), "server", ".d{1...4}");
+    }
 
     Map<String, String> env = pb.environment();
-    env.put("MINIO_ACCESS_KEY", "minio");
-    env.put("MINIO_SECRET_KEY", "minio123");
+    env.put("MINIO_ROOT_USER", "minio");
+    env.put("MINIO_ROOT_PASSWORD", "minio123");
+    env.put("MINIO_CI_CD", "1");
     env.put("MINIO_KMS_KES_ENDPOINT", "https://play.min.io:7373");
     env.put("MINIO_KMS_KES_KEY_FILE", "play.min.io.kes.root.key");
     env.put("MINIO_KMS_KES_CERT_FILE", "play.min.io.kes.root.cert");
@@ -3797,10 +3865,68 @@ public class FunctionalTest {
     pb.redirectErrorStream(true);
     pb.redirectOutput(ProcessBuilder.Redirect.to(new File(MINIO_BINARY + ".log")));
 
-    System.out.println("starting minio server");
+    if (tls) {
+      System.out.println("starting minio server in TLS");
+    } else {
+      System.out.println("starting minio server");
+    }
     Process p = pb.start();
     Thread.sleep(10 * 1000); // wait for 10 seconds to do real start.
     return p;
+  }
+
+  public static void runEndpointTests(boolean automated) throws Exception {
+    client = MinioClient.builder().endpoint(endpoint).credentials(accessKey, secretKey).build();
+    MinioAdminClient adminClient =
+        MinioAdminClient.builder().endpoint(endpoint).credentials(accessKey, secretKey).build();
+    adminClientTests = new TestMinioAdminClient(adminClient, mintEnv);
+    // Enable trace for debugging.
+    // client.traceOn(System.out);
+    if (!mintEnv) System.out.println(">>> Running tests:");
+    FunctionalTest.runTests();
+
+    if (automated) {
+      // Run tests on TLS endpoint
+      client =
+          MinioClient.builder().endpoint(endpointTLS).credentials(accessKey, secretKey).build();
+      client.ignoreCertCheck();
+      adminClient =
+          MinioAdminClient.builder()
+              .endpoint(endpointTLS)
+              .credentials(accessKey, secretKey)
+              .build();
+      adminClient.ignoreCertCheck();
+      adminClientTests = new TestMinioAdminClient(adminClient, mintEnv);
+      // Enable trace for debugging.
+      // client.traceOn(System.out);
+      if (!mintEnv) System.out.println(">>> Running tests on TLS endpoint:");
+      isSecureEndpoint = true;
+      FunctionalTest.runTests();
+    }
+
+    if (!mintEnv) {
+      System.out.println();
+      System.out.println(">>> Running tests for region:");
+      isQuickTest = true;
+      isSecureEndpoint = endpoint.toLowerCase(Locale.US).contains("https://");
+      // Get new bucket name to avoid minio azure gateway failure.
+      bucketName = getRandomName();
+      bucketNameWithLock = getRandomName();
+      client =
+          MinioClient.builder()
+              .endpoint(endpoint)
+              .credentials(accessKey, secretKey)
+              .region(region)
+              .build();
+      adminClient =
+          MinioAdminClient.builder()
+              .endpoint(endpoint)
+              .credentials(accessKey, secretKey)
+              .region(region)
+              .build();
+      adminClientTests = new TestMinioAdminClient(adminClient, mintEnv);
+      FunctionalTest.runTests();
+    }
   }
 
   /** main(). */
@@ -3809,6 +3935,7 @@ public class FunctionalTest {
     mintEnv = (mintMode != null);
     if (mintEnv) {
       isQuickTest = !mintMode.equals("full");
+      isRunOnFail = "1".equals(System.getenv("RUN_ON_FAIL"));
       String dataDir = System.getenv("MINT_DATA_DIR");
       if (dataDir != null && !dataDir.equals("")) {
         dataFile1Kb = Paths.get(dataDir, "datafile-1-kB");
@@ -3823,10 +3950,13 @@ public class FunctionalTest {
     skipSseTests = System.getenv("SKIP_SSE_TESTS") != null && System.getenv("SKIP_SSE_TESTS").equals("1");
 
     Process minioProcess = null;
+    Process minioProcessTLS = null;
 
+    boolean automated = true;
     String kmsKeyName = "my-minio-key";
     if (args.length != 4) {
       endpoint = "http://localhost:9000";
+      endpointTLS = "https://localhost:9001";
       accessKey = "minio";
       secretKey = "minio123";
       region = "us-east-1";
@@ -3836,9 +3966,19 @@ public class FunctionalTest {
         System.exit(-1);
       }
 
-      minioProcess = runMinio();
+      minioProcess = runMinio(false);
       try {
         int exitValue = minioProcess.exitValue();
+        System.out.println("minio server process exited with " + exitValue);
+        System.out.println("usage: FunctionalTest <ENDPOINT> <ACCESSKEY> <SECRETKEY> <REGION>");
+        System.exit(-1);
+      } catch (IllegalThreadStateException e) {
+        ignore();
+      }
+
+      minioProcessTLS = runMinio(true);
+      try {
+        int exitValue = minioProcessTLS.exitValue();
         System.out.println("minio server process exited with " + exitValue);
         System.out.println("usage: FunctionalTest <ENDPOINT> <ACCESSKEY> <SECRETKEY> <REGION>");
         System.exit(-1);
@@ -3855,6 +3995,7 @@ public class FunctionalTest {
       accessKey = args[1];
       secretKey = args[2];
       region = args[3];
+      automated = false;
     }
 
     isSecureEndpoint = endpoint.toLowerCase(Locale.US).contains("https://");
@@ -3866,26 +4007,7 @@ public class FunctionalTest {
 
     int exitValue = 0;
     try {
-      client = MinioClient.builder().endpoint(endpoint).credentials(accessKey, secretKey).build();
-      // Enable trace for debugging.
-      // client.traceOn(System.out);
-      if (!mintEnv) System.out.println(">>> Running tests:");
-      FunctionalTest.runTests();
-      if (!mintEnv) {
-        System.out.println();
-        System.out.println(">>> Running tests for region:");
-        isQuickTest = true;
-        // Get new bucket name to avoid minio azure gateway failure.
-        bucketName = getRandomName();
-        bucketNameWithLock = getRandomName();
-        client =
-            MinioClient.builder()
-                .endpoint(endpoint)
-                .credentials(accessKey, secretKey)
-                .region(region)
-                .build();
-        FunctionalTest.runTests();
-      }
+      runEndpointTests(automated);
     } catch (Exception e) {
       if (!mintEnv) {
         e.printStackTrace();
@@ -3894,6 +4016,9 @@ public class FunctionalTest {
     } finally {
       if (minioProcess != null) {
         minioProcess.destroy();
+      }
+      if (minioProcessTLS != null) {
+        minioProcessTLS.destroy();
       }
     }
 

@@ -16,11 +16,13 @@
 
 package io.minio;
 
-import com.google.common.base.Objects;
 import io.minio.messages.DeleteObject;
 import java.util.LinkedList;
+import java.util.Objects;
 
-/** Argument class of {@link MinioClient#removeObjects}. */
+/**
+ * Argument class of {@link MinioAsyncClient#removeObjects} and {@link MinioClient#removeObjects}.
+ */
 public class RemoveObjectsArgs extends BucketArgs {
   private boolean bypassGovernanceMode;
   private Iterable<DeleteObject> objects = new LinkedList<>();
@@ -58,11 +60,11 @@ public class RemoveObjectsArgs extends BucketArgs {
     if (!super.equals(o)) return false;
     RemoveObjectsArgs that = (RemoveObjectsArgs) o;
     return bypassGovernanceMode == that.bypassGovernanceMode
-        && Objects.equal(objects, that.objects);
+        && Objects.equals(objects, that.objects);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hashCode(super.hashCode(), bypassGovernanceMode, objects);
+    return Objects.hash(super.hashCode(), bypassGovernanceMode, objects);
   }
 }

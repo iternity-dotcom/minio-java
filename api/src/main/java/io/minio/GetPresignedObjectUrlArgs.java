@@ -16,11 +16,14 @@
 
 package io.minio;
 
-import com.google.common.base.Objects;
 import io.minio.http.Method;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
-/** Argument class of {@link MinioClient#getPresignedObjectUrl}. */
+/**
+ * Argument class of {@link MinioAsyncClient#getPresignedObjectUrl} and {@link
+ * MinioClient#getPresignedObjectUrl}.
+ */
 public class GetPresignedObjectUrlArgs extends ObjectVersionArgs {
   // default expiration for a presigned URL is 7 days in seconds
   public static final int DEFAULT_EXPIRY_TIME = (int) TimeUnit.DAYS.toSeconds(7);
@@ -92,6 +95,6 @@ public class GetPresignedObjectUrlArgs extends ObjectVersionArgs {
 
   @Override
   public int hashCode() {
-    return Objects.hashCode(super.hashCode(), method, expiry);
+    return Objects.hash(super.hashCode(), method, expiry);
   }
 }

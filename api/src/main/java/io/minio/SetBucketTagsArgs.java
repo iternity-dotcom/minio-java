@@ -16,11 +16,13 @@
 
 package io.minio;
 
-import com.google.common.base.Objects;
 import io.minio.messages.Tags;
 import java.util.Map;
+import java.util.Objects;
 
-/** Argument class of {@link MinioClient#setBucketTags}. */
+/**
+ * Argument class of {@link MinioAsyncClient#setBucketTags} and {@link MinioClient#setBucketTags}.
+ */
 public class SetBucketTagsArgs extends BucketArgs {
   private Tags tags;
 
@@ -62,11 +64,11 @@ public class SetBucketTagsArgs extends BucketArgs {
     if (!(o instanceof SetBucketTagsArgs)) return false;
     if (!super.equals(o)) return false;
     SetBucketTagsArgs that = (SetBucketTagsArgs) o;
-    return Objects.equal(tags, that.tags);
+    return Objects.equals(tags, that.tags);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hashCode(super.hashCode(), tags);
+    return Objects.hash(super.hashCode(), tags);
   }
 }

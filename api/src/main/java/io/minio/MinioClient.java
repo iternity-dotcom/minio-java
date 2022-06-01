@@ -17,12 +17,8 @@
 
 package io.minio;
 
-import com.google.common.collect.HashMultimap;
-import com.google.common.collect.Multimap;
-import com.google.common.io.ByteStreams;
-import io.minio.credentials.Credentials;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.minio.credentials.Provider;
-import io.minio.credentials.StaticProvider;
 import io.minio.errors.BucketPolicyTooLargeException;
 import io.minio.errors.ErrorResponseException;
 import io.minio.errors.InsufficientDataException;
@@ -30,65 +26,30 @@ import io.minio.errors.InternalException;
 import io.minio.errors.InvalidResponseException;
 import io.minio.errors.ServerException;
 import io.minio.errors.XmlParserException;
-import io.minio.http.Method;
 import io.minio.messages.Bucket;
-import io.minio.messages.CopyObjectResult;
-import io.minio.messages.CreateBucketConfiguration;
 import io.minio.messages.DeleteError;
-import io.minio.messages.DeleteObject;
 import io.minio.messages.Item;
-import io.minio.messages.LegalHold;
 import io.minio.messages.LifecycleConfiguration;
-import io.minio.messages.ListAllMyBucketsResult;
 import io.minio.messages.NotificationConfiguration;
 import io.minio.messages.NotificationRecords;
 import io.minio.messages.ObjectLockConfiguration;
-import io.minio.messages.Part;
 import io.minio.messages.ReplicationConfiguration;
 import io.minio.messages.Retention;
-import io.minio.messages.SelectObjectContentRequest;
 import io.minio.messages.SseConfiguration;
 import io.minio.messages.Tags;
 import io.minio.messages.VersioningConfiguration;
-import io.minio.org.apache.commons.validator.routines.InetAddressValidator;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.io.RandomAccessFile;
 import java.net.URL;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
-import java.security.GeneralSecurityException;
 import java.security.InvalidKeyException;
-import java.security.KeyStore;
+import java.security.KeyManagementException;
 import java.security.NoSuchAlgorithmException;
-import java.security.cert.Certificate;
-import java.security.cert.CertificateFactory;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
-import java.util.NoSuchElementException;
-import java.util.concurrent.TimeUnit;
-import javax.net.ssl.KeyManager;
-import javax.net.ssl.KeyManagerFactory;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLSocketFactory;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.TrustManagerFactory;
-import javax.net.ssl.X509TrustManager;
+import java.util.concurrent.ExecutionException;
 import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
-import okhttp3.Protocol;
-import okhttp3.Request;
-import okhttp3.Response;
 
 /**
  * Simple Storage Service (aka S3) client to perform bucket and object operations.
@@ -134,29 +95,15 @@ import okhttp3.Response;
  *         .build();
  * }</pre>
  */
-public class MinioClient extends S3Base {
-  private MinioClient(
-      HttpUrl baseUrl,
-      String region,
-      boolean isAwsHost,
-      boolean isAcceleratedHost,
-      boolean isDualStackHost,
-      boolean useVirtualStyle,
-      Provider provider,
-      OkHttpClient httpClient) {
-    super(
-        baseUrl,
-        region,
-        isAwsHost,
-        isAcceleratedHost,
-        isDualStackHost,
-        useVirtualStyle,
-        provider,
-        httpClient);
+public class MinioClient {
+  private MinioAsyncClient asyncClient = null;
+
+  private MinioClient(MinioAsyncClient asyncClient) {
+    this.asyncClient = asyncClient;
   }
 
   protected MinioClient(MinioClient client) {
-    super(client);
+    this.asyncClient = client.asyncClient;
   }
 
   /**
@@ -214,7 +161,14 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    return super.statObject(args);
+    try {
+      return asyncClient.statObject(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return null;
+    }
   }
 
   /**
@@ -251,19 +205,14 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    args.validateSsec(this.baseUrl);
-    Response response =
-        executeGet(
-            args,
-            args.getHeaders(),
-            (args.versionId() != null) ? newMultimap("versionId", args.versionId()) : null);
-    return new GetObjectResponse(
-        response.headers(),
-        args.bucket(),
-        args.region(),
-        args.object(),
-        response.body().byteStream());
+    try {
+      return asyncClient.getObject(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return null;
+    }
   }
 
   /**
@@ -271,11 +220,11 @@ public class MinioClient extends S3Base {
    *
    * <pre>Example:{@code
    * minioClient.downloadObject(
-   *   GetObjectArgs.builder()
+   *   DownloadObjectArgs.builder()
    *     .bucket("my-bucketname")
    *     .object("my-objectname")
    *     .ssec(ssec)
-   *     .fileName("my-filename")
+   *     .filename("my-filename")
    *     .build());
    * }</pre>
    *
@@ -294,79 +243,12 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    String filename = args.filename();
-    Path filePath = Paths.get(filename);
-    boolean fileExists = Files.exists(filePath);
-
-    StatObjectResponse stat = statObject(new StatObjectArgs(args));
-
-    String tempFilename = filename + "." + stat.etag() + ".part.minio";
-    Path tempFilePath = Paths.get(tempFilename);
-    boolean tempFileExists = Files.exists(tempFilePath);
-
-    if (tempFileExists && !Files.isRegularFile(tempFilePath)) {
-      throw new IOException(tempFilename + ": not a regular file");
-    }
-
-    long tempFileSize = 0;
-    if (tempFileExists) {
-      tempFileSize = Files.size(tempFilePath);
-      if (tempFileSize > stat.size()) {
-        Files.delete(tempFilePath);
-        tempFileExists = false;
-        tempFileSize = 0;
-      }
-    }
-
-    if (fileExists) {
-      long fileSize = Files.size(filePath);
-      if (fileSize == stat.size()) {
-        // already downloaded. nothing to do
-        return;
-      } else if (fileSize > stat.size()) {
-        throw new IllegalArgumentException(
-            "Source object, '"
-                + args.object()
-                + "', size:"
-                + stat.size()
-                + " is smaller than the destination file, '"
-                + filename
-                + "', size:"
-                + fileSize);
-      } else if (!tempFileExists) {
-        // before resuming the download, copy filename to tempfilename
-        Files.copy(filePath, tempFilePath);
-        tempFileSize = fileSize;
-        tempFileExists = true;
-      }
-    }
-
-    InputStream is = null;
-    OutputStream os = null;
     try {
-      is = getObject(new GetObjectArgs(args));
-      os =
-          Files.newOutputStream(tempFilePath, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-      long bytesWritten = ByteStreams.copy(is, os);
-      is.close();
-      os.close();
-
-      if (bytesWritten != stat.size() - tempFileSize) {
-        throw new IOException(
-            tempFilename
-                + ": unexpected data written.  expected = "
-                + (stat.size() - tempFileSize)
-                + ", written = "
-                + bytesWritten);
-      }
-      Files.move(tempFilePath, filePath, StandardCopyOption.REPLACE_EXISTING);
-    } finally {
-      if (is != null) {
-        is.close();
-      }
-      if (os != null) {
-        os.close();
-      }
+      asyncClient.downloadObject(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
     }
   }
 
@@ -380,7 +262,11 @@ public class MinioClient extends S3Base {
    *     CopyObjectArgs.builder()
    *         .bucket("my-bucketname")
    *         .object("my-objectname")
-   *         .srcBucket("my-source-bucketname")
+   *         .source(
+   *             CopySource.builder()
+   *                 .bucket("my-source-bucketname")
+   *                 .object("my-objectname")
+   *                 .build())
    *         .build());
    *
    * // Create object "my-objectname" in bucket "my-bucketname" by copying from object
@@ -389,18 +275,53 @@ public class MinioClient extends S3Base {
    *     CopyObjectArgs.builder()
    *         .bucket("my-bucketname")
    *         .object("my-objectname")
-   *         .srcBucket("my-source-bucketname")
-   *         .srcObject("my-source-objectname")
+   *         .source(
+   *             CopySource.builder()
+   *                 .bucket("my-source-bucketname")
+   *                 .object("my-source-objectname")
+   *                 .build())
    *         .build());
    *
-   * // Create object "my-objectname" in bucket "my-bucketname" with server-side encryption by
-   * // copying from object "my-objectname" in bucket "my-source-bucketname".
+   * // Create object "my-objectname" in bucket "my-bucketname" with SSE-KMS server-side
+   * // encryption by copying from object "my-objectname" in bucket "my-source-bucketname".
    * minioClient.copyObject(
    *     CopyObjectArgs.builder()
    *         .bucket("my-bucketname")
    *         .object("my-objectname")
-   *         .srcBucket("my-source-bucketname")
-   *         .sse(sse)
+   *         .source(
+   *             CopySource.builder()
+   *                 .bucket("my-source-bucketname")
+   *                 .object("my-objectname")
+   *                 .build())
+   *         .sse(sseKms) // Replace with actual key.
+   *         .build());
+   *
+   * // Create object "my-objectname" in bucket "my-bucketname" with SSE-S3 server-side
+   * // encryption by copying from object "my-objectname" in bucket "my-source-bucketname".
+   * minioClient.copyObject(
+   *     CopyObjectArgs.builder()
+   *         .bucket("my-bucketname")
+   *         .object("my-objectname")
+   *         .source(
+   *             CopySource.builder()
+   *                 .bucket("my-source-bucketname")
+   *                 .object("my-objectname")
+   *                 .build())
+   *         .sse(sseS3) // Replace with actual key.
+   *         .build());
+   *
+   * // Create object "my-objectname" in bucket "my-bucketname" with SSE-C server-side encryption
+   * // by copying from object "my-objectname" in bucket "my-source-bucketname".
+   * minioClient.copyObject(
+   *     CopyObjectArgs.builder()
+   *         .bucket("my-bucketname")
+   *         .object("my-objectname")
+   *         .source(
+   *             CopySource.builder()
+   *                 .bucket("my-source-bucketname")
+   *                 .object("my-objectname")
+   *                 .build())
+   *         .sse(ssec) // Replace with actual key.
    *         .build());
    *
    * // Create object "my-objectname" in bucket "my-bucketname" by copying from SSE-C encrypted
@@ -409,20 +330,27 @@ public class MinioClient extends S3Base {
    *     CopyObjectArgs.builder()
    *         .bucket("my-bucketname")
    *         .object("my-objectname")
-   *         .srcBucket("my-source-bucketname")
-   *         .srcObject("my-source-objectname")
-   *         .srcSsec(ssec)
+   *         .source(
+   *             CopySource.builder()
+   *                 .bucket("my-source-bucketname")
+   *                 .object("my-source-objectname")
+   *                 .ssec(ssec) // Replace with actual key.
+   *                 .build())
    *         .build());
    *
-   * // Create object "my-objectname" in bucket "my-bucketname" with custom headers by copying from
-   * // object "my-objectname" in bucket "my-source-bucketname" using conditions.
+   * // Create object "my-objectname" in bucket "my-bucketname" with custom headers conditionally
+   * // by copying from object "my-objectname" in bucket "my-source-bucketname".
    * minioClient.copyObject(
    *     CopyObjectArgs.builder()
    *         .bucket("my-bucketname")
    *         .object("my-objectname")
-   *         .srcBucket("my-source-bucketname")
-   *         .headers(headers)
-   *         .srcMatchETag(etag)
+   *         .source(
+   *             CopySource.builder()
+   *                 .bucket("my-source-bucketname")
+   *                 .object("my-objectname")
+   *                 .matchETag(etag) // Replace with actual etag.
+   *                 .build())
+   *         .headers(headers) // Replace with actual headers.
    *         .build());
    * }</pre>
    *
@@ -441,51 +369,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    args.validateSse(this.baseUrl);
-
-    long size = -1;
-    if (args.source().offset() != null && args.source().length() != null) {
-      StatObjectResponse stat = statObject(new StatObjectArgs((ObjectReadArgs) args.source()));
-      size = stat.size();
-    }
-
-    if (args.source().offset() != null
-        || args.source().length() != null
-        || size > ObjectWriteArgs.MAX_PART_SIZE) {
-      if (args.metadataDirective() != null && args.metadataDirective() == Directive.COPY) {
-        throw new IllegalArgumentException(
-            "COPY metadata directive is not applicable to source object size greater than 5 GiB");
-      }
-      if (args.taggingDirective() != null && args.taggingDirective() == Directive.COPY) {
-        throw new IllegalArgumentException(
-            "COPY tagging directive is not applicable to source object size greater than 5 GiB");
-      }
-
-      return composeObject(new ComposeObjectArgs(args));
-    }
-
-    Multimap<String, String> headers = args.genHeaders();
-
-    if (args.metadataDirective() != null) {
-      headers.put("x-amz-metadata-directive", args.metadataDirective().name());
-    }
-
-    if (args.taggingDirective() != null) {
-      headers.put("x-amz-tagging-directive", args.taggingDirective().name());
-    }
-
-    headers.putAll(args.source().genCopyHeaders());
-
-    try (Response response = executePut(args, headers, null, null, 0)) {
-      CopyObjectResult result = Xml.unmarshal(CopyObjectResult.class, response.body().charStream());
-      return new ObjectWriteResponse(
-          response.headers(),
-          args.bucket(),
-          args.region(),
-          args.object(),
-          result.etag(),
-          response.header("x-amz-version-id"));
+    try {
+      return asyncClient.copyObject(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return null;
     }
   }
 
@@ -550,106 +440,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    args.validateSse(this.baseUrl);
-    List<ComposeSource> sources = args.sources();
-    int partCount = calculatePartCount(sources);
-    if (partCount == 1
-        && args.sources().get(0).offset() == null
-        && args.sources().get(0).length() == null) {
-      return copyObject(new CopyObjectArgs(args));
-    }
-
-    Multimap<String, String> headers = newMultimap(args.extraHeaders());
-    headers.putAll(args.genHeaders());
-    CreateMultipartUploadResponse createMultipartUploadResponse =
-        createMultipartUpload(
-            args.bucket(), args.region(), args.object(), headers, args.extraQueryParams());
-    String uploadId = createMultipartUploadResponse.result().uploadId();
-
-    Multimap<String, String> ssecHeaders = HashMultimap.create();
-    if (args.sse() != null && args.sse() instanceof ServerSideEncryptionCustomerKey) {
-      ssecHeaders.putAll(newMultimap(args.sse().headers()));
-    }
-
     try {
-      int partNumber = 0;
-      Part[] totalParts = new Part[partCount];
-      for (ComposeSource src : sources) {
-        long size = src.objectSize();
-        if (src.length() != null) {
-          size = src.length();
-        } else if (src.offset() != null) {
-          size -= src.offset();
-        }
-        long offset = 0;
-        if (src.offset() != null) {
-          offset = src.offset();
-        }
-
-        headers = newMultimap(src.headers());
-        headers.putAll(ssecHeaders);
-
-        if (size <= ObjectWriteArgs.MAX_PART_SIZE) {
-          partNumber++;
-          if (src.length() != null) {
-            headers.put(
-                "x-amz-copy-source-range", "bytes=" + offset + "-" + (offset + src.length() - 1));
-          } else if (src.offset() != null) {
-            headers.put("x-amz-copy-source-range", "bytes=" + offset + "-" + (offset + size - 1));
-          }
-
-          UploadPartCopyResponse response =
-              uploadPartCopy(
-                  args.bucket(), args.region(), args.object(), uploadId, partNumber, headers, null);
-          String eTag = response.result().etag();
-
-          totalParts[partNumber - 1] = new Part(partNumber, eTag);
-          continue;
-        }
-
-        while (size > 0) {
-          partNumber++;
-
-          long startBytes = offset;
-          long endBytes = startBytes + ObjectWriteArgs.MAX_PART_SIZE;
-          if (size < ObjectWriteArgs.MAX_PART_SIZE) {
-            endBytes = startBytes + size;
-          }
-
-          Multimap<String, String> headersCopy = newMultimap(headers);
-          headersCopy.put("x-amz-copy-source-range", "bytes=" + startBytes + "-" + endBytes);
-
-          UploadPartCopyResponse response =
-              uploadPartCopy(
-                  args.bucket(),
-                  args.region(),
-                  args.object(),
-                  uploadId,
-                  partNumber,
-                  headersCopy,
-                  null);
-          String eTag = response.result().etag();
-          totalParts[partNumber - 1] = new Part(partNumber, eTag);
-          offset = startBytes;
-          size -= (endBytes - startBytes);
-        }
-      }
-
-      return completeMultipartUpload(
-          args.bucket(),
-          getRegion(args.bucket(), args.region()),
-          args.object(),
-          uploadId,
-          totalParts,
-          null,
-          null);
-    } catch (RuntimeException e) {
-      abortMultipartUpload(args.bucket(), args.region(), args.object(), uploadId, null, null);
-      throw e;
-    } catch (Exception e) {
-      abortMultipartUpload(args.bucket(), args.region(), args.object(), uploadId, null, null);
-      throw e;
+      return asyncClient.composeObject(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return null;
     }
   }
 
@@ -715,32 +512,7 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           XmlParserException, ServerException {
-    checkArgs(args);
-
-    byte[] body = (args.method() == Method.PUT || args.method() == Method.POST) ? EMPTY_BODY : null;
-
-    Multimap<String, String> queryParams = newMultimap(args.extraQueryParams());
-    if (args.versionId() != null) queryParams.put("versionId", args.versionId());
-
-    String region = getRegion(args.bucket(), args.region());
-    if (provider == null) {
-      HttpUrl url = buildUrl(args.method(), args.bucket(), args.object(), region, queryParams);
-      return url.toString();
-    }
-
-    Credentials creds = provider.fetch();
-    if (creds.sessionToken() != null) queryParams.put("X-Amz-Security-Token", creds.sessionToken());
-    HttpUrl url = buildUrl(args.method(), args.bucket(), args.object(), region, queryParams);
-    Request request =
-        createRequest(
-            url,
-            args.method(),
-            args.extraHeaders() == null ? null : httpHeaders(args.extraHeaders()),
-            body,
-            0,
-            creds);
-    url = Signer.presignV4(request, region, creds.accessKey(), creds.secretKey(), args.expiry());
-    return url.toString();
+    return asyncClient.getPresignedObjectUrl(args);
   }
 
   /**
@@ -805,12 +577,7 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    if (provider == null) {
-      throw new IllegalArgumentException(
-          "Anonymous access does not require presigned post form-data");
-    }
-
-    return policy.formData(provider.fetch(), getRegion(policy.bucket(), null));
+    return asyncClient.getPresignedPostFormData(policy);
   }
 
   /**
@@ -854,13 +621,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    executeDelete(
-        args,
-        args.bypassGovernanceMode()
-            ? newMultimap("x-amz-bypass-governance-retention", "true")
-            : null,
-        (args.versionId() != null) ? newMultimap("versionId", args.versionId()) : null);
+    try {
+      asyncClient.removeObject(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -886,104 +653,7 @@ public class MinioClient extends S3Base {
    * @return {@code Iterable<Result<DeleteError>>} - Lazy iterator contains object removal status.
    */
   public Iterable<Result<DeleteError>> removeObjects(RemoveObjectsArgs args) {
-    checkArgs(args);
-
-    return new Iterable<Result<DeleteError>>() {
-      @Override
-      public Iterator<Result<DeleteError>> iterator() {
-        return new Iterator<Result<DeleteError>>() {
-          private Result<DeleteError> error = null;
-          private Iterator<DeleteError> errorIterator = null;
-          private boolean completed = false;
-          private Iterator<DeleteObject> objectIter = args.objects().iterator();
-
-          private void setError() {
-            error = null;
-            while (errorIterator.hasNext()) {
-              DeleteError deleteError = errorIterator.next();
-              if (!"NoSuchVersion".equals(deleteError.code())) {
-                error = new Result<>(deleteError);
-                break;
-              }
-            }
-          }
-
-          private synchronized void populate() {
-            if (completed) {
-              return;
-            }
-
-            try {
-              List<DeleteObject> objectList = new LinkedList<>();
-              while (objectIter.hasNext() && objectList.size() < 1000) {
-                objectList.add(objectIter.next());
-              }
-
-              completed = objectList.isEmpty();
-              if (completed) return;
-              DeleteObjectsResponse response =
-                  deleteObjects(
-                      args.bucket(),
-                      args.region(),
-                      objectList,
-                      true,
-                      args.bypassGovernanceMode(),
-                      args.extraHeaders(),
-                      args.extraQueryParams());
-              if (!response.result().errorList().isEmpty()) {
-                errorIterator = response.result().errorList().iterator();
-                setError();
-                completed = true;
-              }
-            } catch (ErrorResponseException
-                | InsufficientDataException
-                | InternalException
-                | InvalidKeyException
-                | InvalidResponseException
-                | IOException
-                | NoSuchAlgorithmException
-                | ServerException
-                | XmlParserException e) {
-              error = new Result<>(e);
-              completed = true;
-            }
-          }
-
-          @Override
-          public boolean hasNext() {
-            while (error == null && errorIterator == null && !completed) {
-              populate();
-            }
-
-            if (error == null && errorIterator != null) setError();
-            if (error != null) return true;
-            if (completed) return false;
-
-            errorIterator = null;
-            return hasNext();
-          }
-
-          @Override
-          public Result<DeleteError> next() {
-            if (!hasNext()) throw new NoSuchElementException();
-
-            if (this.error != null) {
-              Result<DeleteError> error = this.error;
-              this.error = null;
-              return error;
-            }
-
-            // This never happens.
-            throw new NoSuchElementException();
-          }
-
-          @Override
-          public void remove() {
-            throw new UnsupportedOperationException();
-          }
-        };
-      }
-    };
+    return asyncClient.removeObjects(args);
   }
 
   /**
@@ -1030,15 +700,7 @@ public class MinioClient extends S3Base {
    * @throws XmlParserException upon parsing response xml
    */
   public Iterable<Result<Item>> listObjects(ListObjectsArgs args) {
-    if (args.includeVersions() || args.versionIdMarker() != null) {
-      return listObjectVersions(args);
-    }
-
-    if (args.useApiVersion1()) {
-      return listObjectsV1(args);
-    }
-
-    return listObjectsV2(args);
+    return asyncClient.listObjects(args);
   }
 
   /**
@@ -1066,7 +728,14 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    return listBuckets(ListBucketsArgs.builder().build());
+    try {
+      return asyncClient.listBuckets().get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return null;
+    }
   }
 
   /**
@@ -1095,10 +764,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    try (Response response = executeGet(args, null, null)) {
-      ListAllMyBucketsResult result =
-          Xml.unmarshal(ListAllMyBucketsResult.class, response.body().charStream());
-      return result.buckets();
+    try {
+      return asyncClient.listBuckets(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return null;
     }
   }
 
@@ -1132,14 +804,13 @@ public class MinioClient extends S3Base {
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
     try {
-      executeHead(args, null, null);
-      return true;
-    } catch (ErrorResponseException e) {
-      if (!e.errorResponse().code().equals(NO_SUCH_BUCKET)) {
-        throw e;
-      }
+      return asyncClient.bucketExists(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return false;
     }
-    return false;
   }
 
   /**
@@ -1183,37 +854,12 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-
-    String region = args.region();
-    if (this.region != null && !this.region.isEmpty()) {
-      // Error out if region does not match with region passed via constructor.
-      if (region != null && !region.equals(this.region)) {
-        throw new IllegalArgumentException(
-            "region must be " + this.region + ", but passed " + region);
-      }
-
-      region = this.region;
-    }
-
-    if (region == null) {
-      region = US_EAST_1;
-    }
-
-    Multimap<String, String> headers =
-        args.objectLock() ? newMultimap("x-amz-bucket-object-lock-enabled", "true") : null;
-
-    try (Response response =
-        execute(
-            Method.PUT,
-            args.bucket(),
-            null,
-            region,
-            httpHeaders(merge(args.extraHeaders(), headers)),
-            args.extraQueryParams(),
-            region.equals(US_EAST_1) ? null : new CreateBucketConfiguration(region),
-            0)) {
-      regionCache.put(args.bucket(), region);
+    try {
+      asyncClient.makeBucket(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
     }
   }
 
@@ -1240,9 +886,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    Response response = executePut(args, null, newMultimap("versioning", ""), args.config(), 0);
-    response.close();
+    try {
+      asyncClient.setBucketVersioning(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -1270,9 +920,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    try (Response response = executeGet(args, null, newMultimap("versioning", ""))) {
-      return Xml.unmarshal(VersioningConfiguration.class, response.body().charStream());
+    try {
+      return asyncClient.getBucketVersioning(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return null;
     }
   }
 
@@ -1301,9 +955,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    Response response = executePut(args, null, newMultimap("object-lock", ""), args.config(), 0);
-    response.close();
+    try {
+      asyncClient.setObjectLockConfiguration(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -1329,10 +987,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    Response response =
-        executePut(args, null, newMultimap("object-lock", ""), new ObjectLockConfiguration(), 0);
-    response.close();
+    try {
+      asyncClient.deleteObjectLockConfiguration(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -1363,9 +1024,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    try (Response response = executeGet(args, null, newMultimap("object-lock", ""))) {
-      return Xml.unmarshal(ObjectLockConfiguration.class, response.body().charStream());
+    try {
+      return asyncClient.getObjectLockConfiguration(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return null;
     }
   }
 
@@ -1399,19 +1064,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    Multimap<String, String> queryParams = newMultimap("retention", "");
-    if (args.versionId() != null) queryParams.put("versionId", args.versionId());
-    Response response =
-        executePut(
-            args,
-            args.bypassGovernanceMode()
-                ? newMultimap("x-amz-bypass-governance-retention", "True")
-                : null,
-            queryParams,
-            args.config(),
-            0);
-    response.close();
+    try {
+      asyncClient.setObjectRetention(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -1444,17 +1103,14 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    Multimap<String, String> queryParams = newMultimap("retention", "");
-    if (args.versionId() != null) queryParams.put("versionId", args.versionId());
-    try (Response response = executeGet(args, null, queryParams)) {
-      return Xml.unmarshal(Retention.class, response.body().charStream());
-    } catch (ErrorResponseException e) {
-      if (!e.errorResponse().code().equals(NO_SUCH_OBJECT_LOCK_CONFIGURATION)) {
-        throw e;
-      }
+    try {
+      return asyncClient.getObjectRetention(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return null;
     }
-    return null;
   }
 
   /**
@@ -1484,11 +1140,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    Multimap<String, String> queryParams = newMultimap("legal-hold", "");
-    if (args.versionId() != null) queryParams.put("versionId", args.versionId());
-    Response response = executePut(args, null, queryParams, new LegalHold(true), 0);
-    response.close();
+    try {
+      asyncClient.enableObjectLegalHold(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -1518,11 +1176,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    Multimap<String, String> queryParams = newMultimap("legal-hold", "");
-    if (args.versionId() != null) queryParams.put("versionId", args.versionId());
-    Response response = executePut(args, null, queryParams, new LegalHold(false), 0);
-    response.close();
+    try {
+      asyncClient.disableObjectLegalHold(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -1560,18 +1220,14 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    Multimap<String, String> queryParams = newMultimap("legal-hold", "");
-    if (args.versionId() != null) queryParams.put("versionId", args.versionId());
-    try (Response response = executeGet(args, null, queryParams)) {
-      LegalHold result = Xml.unmarshal(LegalHold.class, response.body().charStream());
-      return result.status();
-    } catch (ErrorResponseException e) {
-      if (!e.errorResponse().code().equals(NO_SUCH_OBJECT_LOCK_CONFIGURATION)) {
-        throw e;
-      }
+    try {
+      return asyncClient.isObjectLegalHoldEnabled(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return false;
     }
-    return false;
   }
 
   /**
@@ -1596,9 +1252,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    executeDelete(args, null, null);
-    regionCache.remove(args.bucket());
+    try {
+      asyncClient.removeBucket(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -1661,15 +1321,14 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    args.validateSse(this.baseUrl);
-    return putObject(
-        args,
-        args.stream(),
-        args.objectSize(),
-        args.partSize(),
-        args.partCount(),
-        args.contentType());
+    try {
+      return asyncClient.putObject(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return null;
+    }
   }
 
   /**
@@ -1707,11 +1366,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    args.validateSse(this.baseUrl);
-    try (RandomAccessFile file = new RandomAccessFile(args.filename(), "r")) {
-      return putObject(
-          args, file, args.objectSize(), args.partSize(), args.partCount(), args.contentType());
+    try {
+      return asyncClient.uploadObject(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return null;
     }
   }
 
@@ -1740,38 +1401,14 @@ public class MinioClient extends S3Base {
       throws BucketPolicyTooLargeException, ErrorResponseException, InsufficientDataException,
           InternalException, InvalidKeyException, InvalidResponseException, IOException,
           NoSuchAlgorithmException, ServerException, XmlParserException {
-    checkArgs(args);
-    try (Response response = executeGet(args, null, newMultimap("policy", ""))) {
-      byte[] buf = new byte[MAX_BUCKET_POLICY_SIZE];
-      int bytesRead = 0;
-      bytesRead = response.body().byteStream().read(buf, 0, MAX_BUCKET_POLICY_SIZE);
-      if (bytesRead < 0) {
-        throw new IOException("unexpected EOF when reading bucket policy");
-      }
-
-      // Read one byte extra to ensure only MAX_BUCKET_POLICY_SIZE data is sent by the server.
-      if (bytesRead == MAX_BUCKET_POLICY_SIZE) {
-        int byteRead = 0;
-        while (byteRead == 0) {
-          byteRead = response.body().byteStream().read();
-          if (byteRead < 0) {
-            break; // reached EOF which is fine.
-          }
-
-          if (byteRead > 0) {
-            throw new BucketPolicyTooLargeException(args.bucket());
-          }
-        }
-      }
-
-      return new String(buf, 0, bytesRead, StandardCharsets.UTF_8);
-    } catch (ErrorResponseException e) {
-      if (!e.errorResponse().code().equals(NO_SUCH_BUCKET_POLICY)) {
-        throw e;
-      }
+    try {
+      return asyncClient.getBucketPolicy(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return "";
     }
-
-    return "";
   }
 
   /**
@@ -1819,15 +1456,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    Response response =
-        executePut(
-            args,
-            newMultimap("Content-Type", "application/json"),
-            newMultimap("policy", ""),
-            args.config(),
-            0);
-    response.close();
+    try {
+      asyncClient.setBucketPolicy(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -1852,13 +1487,12 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
     try {
-      executeDelete(args, null, newMultimap("policy", ""));
-    } catch (ErrorResponseException e) {
-      if (!e.errorResponse().code().equals(NO_SUCH_BUCKET_POLICY)) {
-        throw e;
-      }
+      asyncClient.deleteBucketPolicy(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
     }
   }
 
@@ -1897,9 +1531,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    Response response = executePut(args, null, newMultimap("lifecycle", ""), args.config(), 0);
-    response.close();
+    try {
+      asyncClient.setBucketLifecycle(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -1924,8 +1562,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    executeDelete(args, null, newMultimap("lifecycle", ""));
+    try {
+      asyncClient.deleteBucketLifecycle(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -1954,16 +1597,14 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    try (Response response = executeGet(args, null, newMultimap("lifecycle", ""))) {
-      return Xml.unmarshal(LifecycleConfiguration.class, response.body().charStream());
-    } catch (ErrorResponseException e) {
-      if (!e.errorResponse().code().equals("NoSuchLifecycleConfiguration")) {
-        throw e;
-      }
+    try {
+      return asyncClient.getBucketLifecycle(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return null;
     }
-
-    return null;
   }
 
   /**
@@ -1991,9 +1632,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    try (Response response = executeGet(args, null, newMultimap("notification", ""))) {
-      return Xml.unmarshal(NotificationConfiguration.class, response.body().charStream());
+    try {
+      return asyncClient.getBucketNotification(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return null;
     }
   }
 
@@ -2036,9 +1681,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    Response response = executePut(args, null, newMultimap("notification", ""), args.config(), 0);
-    response.close();
+    try {
+      asyncClient.setBucketNotification(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -2064,10 +1713,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    Response response =
-        executePut(args, null, newMultimap("notification", ""), new NotificationConfiguration(), 0);
-    response.close();
+    try {
+      asyncClient.deleteBucketNotification(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -2095,16 +1747,14 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    try (Response response = executeGet(args, null, newMultimap("replication", ""))) {
-      return Xml.unmarshal(ReplicationConfiguration.class, response.body().charStream());
-    } catch (ErrorResponseException e) {
-      if (!e.errorResponse().code().equals("ReplicationConfigurationNotFoundError")) {
-        throw e;
-      }
+    try {
+      return asyncClient.getBucketReplication(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return null;
     }
-
-    return null;
   }
 
   /**
@@ -2153,17 +1803,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    Response response =
-        executePut(
-            args,
-            (args.objectLockToken() != null)
-                ? newMultimap("x-amz-bucket-object-lock-token", args.objectLockToken())
-                : null,
-            newMultimap("replication", ""),
-            args.config(),
-            0);
-    response.close();
+    try {
+      asyncClient.setBucketReplication(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -2189,8 +1835,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    executeDelete(args, null, newMultimap("replication", ""));
+    try {
+      asyncClient.deleteBucketReplication(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -2237,17 +1888,7 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-
-    Multimap<String, String> queryParams =
-        newMultimap("prefix", args.prefix(), "suffix", args.suffix());
-    for (String event : args.events()) {
-      queryParams.put("events", event);
-    }
-
-    Response response = executeGet(args, null, queryParams);
-    NotificationResultRecords result = new NotificationResultRecords(response);
-    return result.closeableIterator();
+    return asyncClient.listenBucketNotification(args);
   }
 
   /**
@@ -2299,21 +1940,7 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    args.validateSsec(this.baseUrl);
-    Response response =
-        executePost(
-            args,
-            (args.ssec() != null) ? newMultimap(args.ssec().headers()) : null,
-            newMultimap("select", "", "select-type", "2"),
-            new SelectObjectContentRequest(
-                args.sqlExpression(),
-                args.requestProgress(),
-                args.inputSerialization(),
-                args.outputSerialization(),
-                args.scanStartRange(),
-                args.scanEndRange()));
-    return new SelectResponseStream(response.body().byteStream());
+    return asyncClient.selectObjectContent(args);
   }
 
   /**
@@ -2339,9 +1966,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    Response response = executePut(args, null, newMultimap("encryption", ""), args.config(), 0);
-    response.close();
+    try {
+      asyncClient.setBucketEncryption(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -2369,16 +2000,14 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    try (Response response = executeGet(args, null, newMultimap("encryption", ""))) {
-      return Xml.unmarshal(SseConfiguration.class, response.body().charStream());
-    } catch (ErrorResponseException e) {
-      if (!e.errorResponse().code().equals(SERVER_SIDE_ENCRYPTION_CONFIGURATION_NOT_FOUND_ERROR)) {
-        throw e;
-      }
+    try {
+      return asyncClient.getBucketEncryption(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return null;
     }
-
-    return new SseConfiguration(null);
   }
 
   /**
@@ -2404,13 +2033,12 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
     try {
-      executeDelete(args, null, newMultimap("encryption", ""));
-    } catch (ErrorResponseException e) {
-      if (!e.errorResponse().code().equals(SERVER_SIDE_ENCRYPTION_CONFIGURATION_NOT_FOUND_ERROR)) {
-        throw e;
-      }
+      asyncClient.deleteBucketEncryption(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
     }
   }
 
@@ -2438,16 +2066,14 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    try (Response response = executeGet(args, null, newMultimap("tagging", ""))) {
-      return Xml.unmarshal(Tags.class, response.body().charStream());
-    } catch (ErrorResponseException e) {
-      if (!e.errorResponse().code().equals("NoSuchTagSet")) {
-        throw e;
-      }
+    try {
+      return asyncClient.getBucketTags(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return null;
     }
-
-    return new Tags();
   }
 
   /**
@@ -2476,9 +2102,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    Response response = executePut(args, null, newMultimap("tagging", ""), args.tags(), 0);
-    response.close();
+    try {
+      asyncClient.setBucketTags(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -2503,8 +2133,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    executeDelete(args, null, newMultimap("tagging", ""));
+    try {
+      asyncClient.deleteBucketTags(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -2532,11 +2167,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    Multimap<String, String> queryParams = newMultimap("tagging", "");
-    if (args.versionId() != null) queryParams.put("versionId", args.versionId());
-    try (Response response = executeGet(args, null, queryParams)) {
-      return Xml.unmarshal(Tags.class, response.body().charStream());
+    try {
+      return asyncClient.getObjectTags(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return null;
     }
   }
 
@@ -2570,11 +2207,13 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    Multimap<String, String> queryParams = newMultimap("tagging", "");
-    if (args.versionId() != null) queryParams.put("versionId", args.versionId());
-    Response response = executePut(args, null, queryParams, args.tags(), 0);
-    response.close();
+    try {
+      asyncClient.setObjectTags(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
   }
 
   /**
@@ -2600,290 +2239,211 @@ public class MinioClient extends S3Base {
       throws ErrorResponseException, InsufficientDataException, InternalException,
           InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
           ServerException, XmlParserException {
-    checkArgs(args);
-    Multimap<String, String> queryParams = newMultimap("tagging", "");
-    if (args.versionId() != null) queryParams.put("versionId", args.versionId());
-    executeDelete(args, null, queryParams);
+    try {
+      asyncClient.deleteObjectTags(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+    }
+  }
+
+  /**
+   * Uploads multiple objects in a single put call. It is done by creating intermediate TAR file
+   * optionally compressed which is uploaded to S3 service.
+   *
+   * <pre>Example:{@code
+   * // Upload snowball objects.
+   * List<SnowballObject> objects = new ArrayList<SnowballObject>();
+   * objects.add(
+   *     new SnowballObject(
+   *         "my-object-one",
+   *         new ByteArrayInputStream("hello".getBytes(StandardCharsets.UTF_8)),
+   *         5,
+   *         null));
+   * objects.add(
+   *     new SnowballObject(
+   *         "my-object-two",
+   *         new ByteArrayInputStream("java".getBytes(StandardCharsets.UTF_8)),
+   *         4,
+   *         null));
+   * minioClient.uploadSnowballObjects(
+   *     UploadSnowballObjectsArgs.builder().bucket("my-bucketname").objects(objects).build());
+   * }</pre>
+   *
+   * @param args {@link UploadSnowballObjectsArgs} object.
+   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
+   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
+   * @throws InternalException thrown to indicate internal library error.
+   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
+   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
+   *     response.
+   * @throws IOException thrown to indicate I/O error on S3 operation.
+   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
+   * @throws XmlParserException thrown to indicate XML parsing error.
+   */
+  public ObjectWriteResponse uploadSnowballObjects(UploadSnowballObjectsArgs args)
+      throws ErrorResponseException, InsufficientDataException, InternalException,
+          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
+          ServerException, XmlParserException {
+    try {
+      return asyncClient.uploadSnowballObjects(args).get();
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      asyncClient.throwEncapsulatedException(e);
+      return null;
+    }
+  }
+
+  /**
+   * Sets HTTP connect, write and read timeouts. A value of 0 means no timeout, otherwise values
+   * must be between 1 and Integer.MAX_VALUE when converted to milliseconds.
+   *
+   * <pre>Example:{@code
+   * minioClient.setTimeout(TimeUnit.SECONDS.toMillis(10), TimeUnit.SECONDS.toMillis(10),
+   *     TimeUnit.SECONDS.toMillis(30));
+   * }</pre>
+   *
+   * @param connectTimeout HTTP connect timeout in milliseconds.
+   * @param writeTimeout HTTP write timeout in milliseconds.
+   * @param readTimeout HTTP read timeout in milliseconds.
+   */
+  public void setTimeout(long connectTimeout, long writeTimeout, long readTimeout) {
+    asyncClient.setTimeout(connectTimeout, writeTimeout, readTimeout);
+  }
+
+  /**
+   * Ignores check on server certificate for HTTPS connection.
+   *
+   * <pre>Example:{@code
+   * minioClient.ignoreCertCheck();
+   * }</pre>
+   *
+   * @throws KeyManagementException thrown to indicate key management error.
+   * @throws NoSuchAlgorithmException thrown to indicate missing of SSL library.
+   */
+  @SuppressFBWarnings(value = "SIC", justification = "Should not be used in production anyways.")
+  public void ignoreCertCheck() throws KeyManagementException, NoSuchAlgorithmException {
+    asyncClient.ignoreCertCheck();
+  }
+
+  /**
+   * Sets application's name/version to user agent. For more information about user agent refer <a
+   * href="http://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html">#rfc2616</a>.
+   *
+   * @param name Your application name.
+   * @param version Your application version.
+   */
+  public void setAppInfo(String name, String version) {
+    asyncClient.setAppInfo(name, version);
+  }
+
+  /**
+   * Enables HTTP call tracing and written to traceStream.
+   *
+   * @param traceStream {@link OutputStream} for writing HTTP call tracing.
+   * @see #traceOff
+   */
+  public void traceOn(OutputStream traceStream) {
+    asyncClient.traceOn(traceStream);
+  }
+
+  /**
+   * Disables HTTP call tracing previously enabled.
+   *
+   * @see #traceOn
+   * @throws IOException upon connection error
+   */
+  public void traceOff() throws IOException {
+    asyncClient.traceOff();
+  }
+
+  /** Enables accelerate endpoint for Amazon S3 endpoint. */
+  public void enableAccelerateEndpoint() {
+    asyncClient.enableAccelerateEndpoint();
+  }
+
+  /** Disables accelerate endpoint for Amazon S3 endpoint. */
+  public void disableAccelerateEndpoint() {
+    asyncClient.disableAccelerateEndpoint();
+  }
+
+  /** Enables dual-stack endpoint for Amazon S3 endpoint. */
+  public void enableDualStackEndpoint() {
+    asyncClient.enableDualStackEndpoint();
+  }
+
+  /** Disables dual-stack endpoint for Amazon S3 endpoint. */
+  public void disableDualStackEndpoint() {
+    asyncClient.disableDualStackEndpoint();
+  }
+
+  /** Enables virtual-style endpoint. */
+  public void enableVirtualStyleEndpoint() {
+    asyncClient.enableVirtualStyleEndpoint();
+  }
+
+  /** Disables virtual-style endpoint. */
+  public void disableVirtualStyleEndpoint() {
+    asyncClient.disableVirtualStyleEndpoint();
   }
 
   public static Builder builder() {
     return new Builder();
   }
 
+  /** Argument builder of {@link MinioClient}. */
   public static final class Builder {
-    HttpUrl baseUrl;
-    String region;
-    OkHttpClient httpClient;
-    boolean isAwsHost;
-    boolean isAwsChinaHost;
-    boolean isAcceleratedHost;
-    boolean isDualStackHost;
-    boolean useVirtualStyle;
-    String regionInUrl;
-    Provider provider;
+    private MinioAsyncClient.Builder asyncClientBuilder = null;
 
-    public Builder() {}
-
-    private boolean isAwsEndpoint(String endpoint) {
-      return (endpoint.startsWith("s3.") || isAwsAccelerateEndpoint(endpoint))
-          && (endpoint.endsWith(".amazonaws.com") || endpoint.endsWith(".amazonaws.com.cn"));
-    }
-
-    private boolean isAwsAccelerateEndpoint(String endpoint) {
-      return endpoint.startsWith("s3-accelerate.");
-    }
-
-    private boolean isAwsDualStackEndpoint(String endpoint) {
-      return endpoint.contains(".dualstack.");
-    }
-
-    /**
-     * Extracts region from AWS endpoint if available. Region is placed at second token normal
-     * endpoints and third token for dualstack endpoints.
-     *
-     * <p>Region is marked in square brackets in below examples.
-     * <pre>
-     * https://s3.[us-east-2].amazonaws.com
-     * https://s3.dualstack.[ca-central-1].amazonaws.com
-     * https://s3.[cn-north-1].amazonaws.com.cn
-     * https://s3.dualstack.[cn-northwest-1].amazonaws.com.cn
-     */
-    private String extractRegion(String endpoint) {
-      String[] tokens = endpoint.split("\\.");
-      String token = tokens[1];
-
-      // If token is "dualstack", then region might be in next token.
-      if (token.equals("dualstack")) {
-        token = tokens[2];
-      }
-
-      // If token is equal to "amazonaws", region is not passed in the endpoint.
-      if (token.equals("amazonaws")) {
-        return null;
-      }
-
-      // Return token as region.
-      return token;
-    }
-
-    private void setBaseUrl(HttpUrl url) {
-      String host = url.host();
-      this.isAwsHost = isAwsEndpoint(host);
-      this.isAwsChinaHost = false;
-      if (this.isAwsHost) {
-        this.isAwsChinaHost = host.endsWith(".cn");
-        url =
-            url.newBuilder()
-                .host(this.isAwsChinaHost ? "amazonaws.com.cn" : "amazonaws.com")
-                .build();
-        this.isAcceleratedHost = isAwsAccelerateEndpoint(host);
-        this.isDualStackHost = isAwsDualStackEndpoint(host);
-        this.regionInUrl = extractRegion(host);
-        this.useVirtualStyle = true;
-      } else {
-        this.useVirtualStyle = host.endsWith("aliyuncs.com");
-      }
-
-      this.baseUrl = url;
-    }
-
-    /**
-     * copied logic from
-     * https://github.com/square/okhttp/blob/master/samples/guide/src/main/java/okhttp3/recipes/CustomTrust.java
-     */
-    private OkHttpClient enableExternalCertificates(OkHttpClient httpClient, String filename)
-        throws GeneralSecurityException, IOException {
-      Collection<? extends Certificate> certificates = null;
-      try (FileInputStream fis = new FileInputStream(filename)) {
-        certificates = CertificateFactory.getInstance("X.509").generateCertificates(fis);
-      }
-
-      if (certificates == null || certificates.isEmpty()) {
-        throw new IllegalArgumentException("expected non-empty set of trusted certificates");
-      }
-
-      char[] password = "password".toCharArray(); // Any password will work.
-
-      // Put the certificates a key store.
-      KeyStore keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
-      // By convention, 'null' creates an empty key store.
-      keyStore.load(null, password);
-
-      int index = 0;
-      for (Certificate certificate : certificates) {
-        String certificateAlias = Integer.toString(index++);
-        keyStore.setCertificateEntry(certificateAlias, certificate);
-      }
-
-      // Use it to build an X509 trust manager.
-      KeyManagerFactory keyManagerFactory =
-          KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-      keyManagerFactory.init(keyStore, password);
-      TrustManagerFactory trustManagerFactory =
-          TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-      trustManagerFactory.init(keyStore);
-
-      final KeyManager[] keyManagers = keyManagerFactory.getKeyManagers();
-      final TrustManager[] trustManagers = trustManagerFactory.getTrustManagers();
-
-      SSLContext sslContext = SSLContext.getInstance("TLS");
-      sslContext.init(keyManagers, trustManagers, null);
-      SSLSocketFactory sslSocketFactory = sslContext.getSocketFactory();
-
-      return httpClient
-          .newBuilder()
-          .sslSocketFactory(sslSocketFactory, (X509TrustManager) trustManagers[0])
-          .build();
-    }
-
-    protected void validateNotNull(Object arg, String argName) {
-      if (arg == null) {
-        throw new IllegalArgumentException(argName + " must not be null.");
-      }
-    }
-
-    protected void validateNotEmptyString(String arg, String argName) {
-      validateNotNull(arg, argName);
-      if (arg.isEmpty()) {
-        throw new IllegalArgumentException(argName + " must be a non-empty string.");
-      }
-    }
-
-    protected void validateNullOrNotEmptyString(String arg, String argName) {
-      if (arg != null && arg.isEmpty()) {
-        throw new IllegalArgumentException(argName + " must be a non-empty string.");
-      }
-    }
-
-    private void validateUrl(HttpUrl url) {
-      if (!url.encodedPath().equals("/")) {
-        throw new IllegalArgumentException("no path allowed in endpoint " + url);
-      }
-    }
-
-    private void validateHostnameOrIPAddress(String endpoint) {
-      // Check endpoint is IPv4 or IPv6.
-      if (InetAddressValidator.getInstance().isValid(endpoint)) {
-        return;
-      }
-
-      // Check endpoint is a hostname.
-
-      // Refer https://en.wikipedia.org/wiki/Hostname#Restrictions_on_valid_host_names
-      // why checks are done like below
-      if (endpoint.length() < 1 || endpoint.length() > 253) {
-        throw new IllegalArgumentException("invalid hostname");
-      }
-
-      for (String label : endpoint.split("\\.")) {
-        if (label.length() < 1 || label.length() > 63) {
-          throw new IllegalArgumentException("invalid hostname");
-        }
-
-        if (!(label.matches("^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$"))) {
-          throw new IllegalArgumentException("invalid hostname");
-        }
-      }
-    }
-
-    private HttpUrl getBaseUrl(String endpoint) {
-      validateNotEmptyString(endpoint, "endpoint");
-      HttpUrl url = HttpUrl.parse(endpoint);
-      if (url == null) {
-        validateHostnameOrIPAddress(endpoint);
-        url = new HttpUrl.Builder().scheme("https").host(endpoint).build();
-      } else {
-        validateUrl(url);
-      }
-
-      return url;
+    public Builder() {
+      asyncClientBuilder = MinioAsyncClient.builder();
     }
 
     public Builder endpoint(String endpoint) {
-      setBaseUrl(getBaseUrl(endpoint));
+      asyncClientBuilder.endpoint(endpoint);
       return this;
     }
 
     public Builder endpoint(String endpoint, int port, boolean secure) {
-      HttpUrl url = getBaseUrl(endpoint);
-      if (port < 1 || port > 65535) {
-        throw new IllegalArgumentException("port must be in range of 1 to 65535");
-      }
-      url = url.newBuilder().port(port).scheme(secure ? "https" : "http").build();
-
-      setBaseUrl(url);
+      asyncClientBuilder.endpoint(endpoint, port, secure);
       return this;
     }
 
     public Builder endpoint(URL url) {
-      validateNotNull(url, "url");
-      return endpoint(HttpUrl.get(url));
+      asyncClientBuilder.endpoint(url);
+      return this;
     }
 
     public Builder endpoint(HttpUrl url) {
-      validateNotNull(url, "url");
-      validateUrl(url);
-      setBaseUrl(url);
+      asyncClientBuilder.endpoint(url);
       return this;
     }
 
     public Builder region(String region) {
-      validateNullOrNotEmptyString(region, "region");
-      this.region = region;
-      this.regionInUrl = region;
+      asyncClientBuilder.region(region);
       return this;
     }
 
     public Builder credentials(String accessKey, String secretKey) {
-      this.provider = new StaticProvider(accessKey, secretKey, null);
+      asyncClientBuilder.credentials(accessKey, secretKey);
       return this;
     }
 
     public Builder credentialsProvider(Provider provider) {
-      this.provider = provider;
+      asyncClientBuilder.credentialsProvider(provider);
       return this;
     }
 
     public Builder httpClient(OkHttpClient httpClient) {
-      validateNotNull(httpClient, "http client");
-      this.httpClient = httpClient;
+      asyncClientBuilder.httpClient(httpClient);
       return this;
     }
 
     public MinioClient build() {
-      validateNotNull(baseUrl, "endpoint");
-      if (isAwsChinaHost && regionInUrl == null && region == null) {
-        throw new IllegalArgumentException("Region missing in Amazon S3 China endpoint " + baseUrl);
-      }
-
-      if (httpClient == null) {
-        this.httpClient =
-            new OkHttpClient()
-                .newBuilder()
-                .connectTimeout(DEFAULT_CONNECTION_TIMEOUT, TimeUnit.MINUTES)
-                .writeTimeout(DEFAULT_CONNECTION_TIMEOUT, TimeUnit.MINUTES)
-                .readTimeout(DEFAULT_CONNECTION_TIMEOUT, TimeUnit.MINUTES)
-                .protocols(Arrays.asList(Protocol.HTTP_1_1))
-                .build();
-        String filename = System.getenv("SSL_CERT_FILE");
-        if (filename != null && !filename.isEmpty()) {
-          try {
-            this.httpClient = enableExternalCertificates(this.httpClient, filename);
-          } catch (GeneralSecurityException | IOException e) {
-            throw new RuntimeException(e);
-          }
-        }
-      }
-
-      return new MinioClient(
-          baseUrl,
-          (region != null) ? region : regionInUrl,
-          isAwsHost,
-          isAcceleratedHost,
-          isDualStackHost,
-          useVirtualStyle,
-          provider,
-          httpClient);
+      MinioAsyncClient asyncClient = asyncClientBuilder.build();
+      return new MinioClient(asyncClient);
     }
   }
 }

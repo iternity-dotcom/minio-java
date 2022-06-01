@@ -16,17 +16,21 @@
 
 package io.minio;
 
-import com.google.common.base.Objects;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.util.Objects;
 
-/** Argument class of {@link MinioClient#downloadObject}. */
+/**
+ * Argument class of {@link MinioAsyncClient#downloadObject} and {@link MinioClient#downloadObject}.
+ */
 public class DownloadObjectArgs extends ObjectReadArgs {
   private String filename;
+  private boolean overwrite;
 
   public String filename() {
     return filename;
+  }
+
+  public boolean overwrite() {
+    return overwrite;
   }
 
   public static Builder builder() {
@@ -35,21 +39,19 @@ public class DownloadObjectArgs extends ObjectReadArgs {
 
   /** Argument class of {@link DownloadObjectArgs}. */
   public static final class Builder extends ObjectReadArgs.Builder<Builder, DownloadObjectArgs> {
+    private void validateFilename(String filename) {
+      validateNotEmptyString(filename, "filename");
+    }
+
     public Builder filename(String filename) {
       validateFilename(filename);
       operations.add(args -> args.filename = filename);
       return this;
     }
 
-    private void validateFilename(String filename) {
-      validateNotEmptyString(filename, "filename");
-
-      Path filePath = Paths.get(filename);
-      boolean fileExists = Files.exists(filePath);
-
-      if (fileExists && !Files.isRegularFile(filePath)) {
-        throw new IllegalArgumentException(filename + ": not a regular file");
-      }
+    public Builder overwrite(boolean flag) {
+      operations.add(args -> args.overwrite = flag);
+      return this;
     }
   }
 
@@ -59,11 +61,12 @@ public class DownloadObjectArgs extends ObjectReadArgs {
     if (!(o instanceof DownloadObjectArgs)) return false;
     if (!super.equals(o)) return false;
     DownloadObjectArgs that = (DownloadObjectArgs) o;
-    return Objects.equal(filename, that.filename);
+    if (!Objects.equals(filename, that.filename)) return false;
+    return overwrite == that.overwrite;
   }
 
   @Override
   public int hashCode() {
-    return Objects.hashCode(super.hashCode(), filename);
+    return Objects.hash(super.hashCode(), filename, overwrite);
   }
 }

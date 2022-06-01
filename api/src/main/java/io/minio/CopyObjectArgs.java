@@ -16,10 +16,10 @@
 
 package io.minio;
 
-import com.google.common.base.Objects;
+import java.util.Objects;
 import okhttp3.HttpUrl;
 
-/** Argument class of {@link MinioClient#copyObject}. */
+/** Argument class of {@link MinioAsyncClient#copyObject} and {@link MinioClient#copyObject}. */
 public class CopyObjectArgs extends ObjectWriteArgs {
   private CopySource source = null;
   private Directive metadataDirective;
@@ -105,13 +105,13 @@ public class CopyObjectArgs extends ObjectWriteArgs {
     if (!(o instanceof CopyObjectArgs)) return false;
     if (!super.equals(o)) return false;
     CopyObjectArgs that = (CopyObjectArgs) o;
-    return Objects.equal(source, that.source)
+    return Objects.equals(source, that.source)
         && metadataDirective == that.metadataDirective
         && taggingDirective == that.taggingDirective;
   }
 
   @Override
   public int hashCode() {
-    return Objects.hashCode(super.hashCode(), source, metadataDirective, taggingDirective);
+    return Objects.hash(super.hashCode(), source, metadataDirective, taggingDirective);
   }
 }
