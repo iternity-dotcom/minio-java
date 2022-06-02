@@ -2277,7 +2277,7 @@ public class FunctionalTest {
         createdObjects.add(response);
         object6Mb = response.object();
 
-        if (isSecureEndpoint || skipSseTests) {
+        if (isSecureEndpoint && !skipSseTests) {
           response =
               client.putObject(
                   PutObjectArgs.builder().bucket(bucketName).object(getRandomName()).stream(
