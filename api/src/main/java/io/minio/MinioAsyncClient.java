@@ -133,7 +133,8 @@ public class MinioAsyncClient extends S3Base {
       HttpUrl baseUrl,
       String region,
       boolean isAwsHost,
-      boolean isAcceleratedHost,
+      boolean isFipsHost,
+      boolean isAccelerateHost,
       boolean isDualStackHost,
       boolean useVirtualStyle,
       Provider provider,
@@ -142,7 +143,8 @@ public class MinioAsyncClient extends S3Base {
         baseUrl,
         region,
         isAwsHost,
-        isAcceleratedHost,
+        isFipsHost,
+        isAccelerateHost,
         isDualStackHost,
         useVirtualStyle,
         provider,
@@ -1211,6 +1213,45 @@ public class MinioAsyncClient extends S3Base {
         };
       }
     };
+  }
+
+  /**
+   * Restores an object asynchronously.
+   *
+   * <pre>Example:{@code
+   * // Restore object.
+   * CompletableFuture<Void> future = minioAsyncClient.restoreObject(
+   *     RestoreObjectArgs.builder()
+   *         .bucket("my-bucketname")
+   *         .object("my-objectname")
+   *         .request(new RestoreRequest(null, null, null, null, null, null))
+   *         .build());
+   *
+   * // Restore versioned object.
+   * CompletableFuture<Void> future = minioAsyncClient.restoreObject(
+   *     RestoreObjectArgs.builder()
+   *         .bucket("my-bucketname")
+   *         .object("my-versioned-objectname")
+   *         .versionId("my-versionid")
+   *         .request(new RestoreRequest(null, null, null, null, null, null))
+   *         .build());
+   * }</pre>
+   *
+   * @param args {@link RestoreObjectArgs} object.
+   * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
+   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
+   * @throws InternalException thrown to indicate internal library error.
+   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
+   * @throws IOException thrown to indicate I/O error on S3 operation.
+   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
+   * @throws XmlParserException thrown to indicate XML parsing error.
+   */
+  public CompletableFuture<Void> restoreObject(RestoreObjectArgs args)
+      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
+          NoSuchAlgorithmException, XmlParserException {
+    checkArgs(args);
+    return executePostAsync(args, null, newMultimap("restore", ""), args.request())
+        .thenAccept(response -> response.close());
   }
 
   /**
@@ -3174,7 +3215,8 @@ public class MinioAsyncClient extends S3Base {
     private HttpUrl baseUrl;
     private String region;
     private boolean isAwsHost;
-    private boolean isAcceleratedHost;
+    private boolean isFipsHost;
+    private boolean isAccelerateHost;
     private boolean isDualStackHost;
     private boolean useVirtualStyle;
     private Provider provider;
@@ -3183,13 +3225,19 @@ public class MinioAsyncClient extends S3Base {
     private boolean isAwsChinaHost;
     private String regionInUrl;
 
-    private boolean isAwsEndpoint(String endpoint) {
-      return (endpoint.startsWith("s3.") || isAwsAccelerateEndpoint(endpoint))
-          && (endpoint.endsWith(".amazonaws.com") || endpoint.endsWith(".amazonaws.com.cn"));
+    private boolean isAwsFipsEndpoint(String endpoint) {
+      return endpoint.startsWith("s3-fips.");
     }
 
     private boolean isAwsAccelerateEndpoint(String endpoint) {
       return endpoint.startsWith("s3-accelerate.");
+    }
+
+    private boolean isAwsEndpoint(String endpoint) {
+      return (endpoint.startsWith("s3.")
+              || isAwsFipsEndpoint(endpoint)
+              || isAwsAccelerateEndpoint(endpoint))
+          && (endpoint.endsWith(".amazonaws.com") || endpoint.endsWith(".amazonaws.com.cn"));
     }
 
     private boolean isAwsDualStackEndpoint(String endpoint) {
@@ -3236,7 +3284,8 @@ public class MinioAsyncClient extends S3Base {
             url.newBuilder()
                 .host(this.isAwsChinaHost ? "amazonaws.com.cn" : "amazonaws.com")
                 .build();
-        this.isAcceleratedHost = isAwsAccelerateEndpoint(host);
+        this.isFipsHost = isAwsFipsEndpoint(host);
+        this.isAccelerateHost = isAwsAccelerateEndpoint(host);
         this.isDualStackHost = isAwsDualStackEndpoint(host);
         this.regionInUrl = extractRegion(host);
         this.useVirtualStyle = true;
@@ -3316,7 +3365,8 @@ public class MinioAsyncClient extends S3Base {
           baseUrl,
           region,
           isAwsHost,
-          isAcceleratedHost,
+          isFipsHost,
+          isAccelerateHost,
           isDualStackHost,
           useVirtualStyle,
           provider,
