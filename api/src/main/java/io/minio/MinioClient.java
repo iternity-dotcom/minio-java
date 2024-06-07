@@ -95,7 +95,7 @@ import okhttp3.OkHttpClient;
  *         .build();
  * }</pre>
  */
-public class MinioClient {
+public class MinioClient implements AutoCloseable {
   private MinioAsyncClient asyncClient = null;
 
   private MinioClient(MinioAsyncClient asyncClient) {
@@ -2405,12 +2405,22 @@ public class MinioClient {
     asyncClient.traceOff();
   }
 
-  /** Enables accelerate endpoint for Amazon S3 endpoint. */
+  /**
+   * Enables accelerate endpoint for Amazon S3 endpoint.
+   *
+   * @deprecated This method is no longer supported.
+   */
+  @Deprecated
   public void enableAccelerateEndpoint() {
     asyncClient.enableAccelerateEndpoint();
   }
 
-  /** Disables accelerate endpoint for Amazon S3 endpoint. */
+  /**
+   * Disables accelerate endpoint for Amazon S3 endpoint.
+   *
+   * @deprecated This method is no longer supported.
+   */
+  @Deprecated
   public void disableAccelerateEndpoint() {
     asyncClient.disableAccelerateEndpoint();
   }
@@ -2433,6 +2443,18 @@ public class MinioClient {
   /** Disables virtual-style endpoint. */
   public void disableVirtualStyleEndpoint() {
     asyncClient.disableVirtualStyleEndpoint();
+  }
+
+  /** Sets AWS S3 domain prefix. */
+  public void setAwsS3Prefix(String awsS3Prefix) {
+    asyncClient.setAwsS3Prefix(awsS3Prefix);
+  }
+
+  @Override
+  public void close() throws Exception {
+    if (asyncClient != null) {
+      asyncClient.close();
+    }
   }
 
   public static Builder builder() {
