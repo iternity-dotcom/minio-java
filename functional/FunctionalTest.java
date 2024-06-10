@@ -1730,6 +1730,7 @@ public class FunctionalTest {
 
       PostPolicy policy = new PostPolicy(bucketName, ZonedDateTime.now().plusDays(7));
       policy.addEqualsCondition("key", objectName);
+      policy.addEqualsCondition("content-type", "image/png");
       policy.addContentLengthRangeCondition(1 * MB, 4 * MB);
       Map<String, String> formData = client.getPresignedPostFormData(policy);
 
@@ -3843,8 +3844,8 @@ public class FunctionalTest {
               "server",
               "--address",
               ":9001",
-              "--config-dir",
-              ".cfg",
+              "--certs-dir",
+              ".cfg/certs",
               ".d{1...4}");
     } else {
       pb = new ProcessBuilder(binaryPath.getPath(), "server", ".d{1...4}");
