@@ -16,21 +16,18 @@
 
 package io.minio.messages;
 
-import java.util.Collections;
-import java.util.LinkedList;
-import java.util.List;
+import io.minio.Utils;
 import org.simpleframework.xml.Element;
-import org.simpleframework.xml.ElementList;
 import org.simpleframework.xml.Namespace;
 import org.simpleframework.xml.Root;
 
 /**
- * Object representation of response XML of <a
+ * Response XML of <a
  * href="https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListParts.html">ListParts API</a>.
  */
 @Root(name = "ListPartsResult", strict = false)
 @Namespace(reference = "http://s3.amazonaws.com/doc/2006-03-01/")
-public class ListPartsResult {
+public class ListPartsResult extends BasePartsResult {
   @Element(name = "Bucket")
   private String bucketName;
 
@@ -46,22 +43,18 @@ public class ListPartsResult {
   @Element(name = "StorageClass")
   private String storageClass;
 
-  @Element(name = "PartNumberMarker")
-  private int partNumberMarker;
+  @Element(name = "UploadId", required = false)
+  private String uploadId;
 
-  @Element(name = "NextPartNumberMarker")
-  private int nextPartNumberMarker;
+  @Element(name = "ChecksumAlgorithm", required = false)
+  private String checksumAlgorithm;
 
-  @Element(name = "MaxParts")
-  private int maxParts;
+  @Element(name = "ChecksumType", required = false)
+  private String checksumType;
 
-  @Element(name = "IsTruncated")
-  private boolean isTruncated;
-
-  @ElementList(name = "Part", inline = true, required = false)
-  private List<Part> partList;
-
-  public ListPartsResult() {}
+  public ListPartsResult() {
+    super();
+  }
 
   /** Returns bucket name. */
   public String bucketName() {
@@ -78,7 +71,7 @@ public class ListPartsResult {
     return storageClass;
   }
 
-  /** Returns initator information. */
+  /** Returns initiator information. */
   public Initiator initiator() {
     return initiator;
   }
@@ -88,32 +81,31 @@ public class ListPartsResult {
     return owner;
   }
 
-  /** Returns maximum parts information received. */
-  public int maxParts() {
-    return maxParts;
+  public String uploadId() {
+    return uploadId;
   }
 
-  /** Returns whether the result is truncated or not. */
-  public boolean isTruncated() {
-    return isTruncated;
+  public String checksumAlgorithm() {
+    return checksumAlgorithm;
   }
 
-  /** Returns part number marker. */
-  public int partNumberMarker() {
-    return partNumberMarker;
+  public String checksumType() {
+    return checksumType;
   }
 
-  /** Returns next part number marker. */
-  public int nextPartNumberMarker() {
-    return nextPartNumberMarker;
-  }
-
-  /** Returns List of Part. */
-  public List<Part> partList() {
-    if (partList == null) {
-      return Collections.unmodifiableList(new LinkedList<>());
-    }
-
-    return Collections.unmodifiableList(partList);
+  @Override
+  public String toString() {
+    return String.format(
+        "ListPartsResult{bucketName=%s, objectName=%s, initiator=%s, owner=%s, storageClass=%s,"
+            + " uploadId=%s, checksumAlgorithm=%s, checksumType=%s, %s}",
+        Utils.stringify(bucketName),
+        Utils.stringify(objectName),
+        Utils.stringify(initiator),
+        Utils.stringify(owner),
+        Utils.stringify(storageClass),
+        Utils.stringify(uploadId),
+        Utils.stringify(checksumAlgorithm),
+        Utils.stringify(checksumType),
+        super.toString());
   }
 }

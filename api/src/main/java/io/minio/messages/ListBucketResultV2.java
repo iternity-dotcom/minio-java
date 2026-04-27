@@ -16,6 +16,7 @@
 
 package io.minio.messages;
 
+import io.minio.Utils;
 import java.util.List;
 import org.simpleframework.xml.Element;
 import org.simpleframework.xml.ElementList;
@@ -23,7 +24,7 @@ import org.simpleframework.xml.Namespace;
 import org.simpleframework.xml.Root;
 
 /**
- * Object representation of response XML of <a
+ * Response XML of <a
  * href="https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html">ListObjectsV2
  * API</a>.
  */
@@ -52,7 +53,7 @@ public class ListBucketResultV2 extends ListObjectsResult {
 
   /** Returns start after. */
   public String startAfter() {
-    return decodeIfNeeded(startAfter);
+    return Utils.urlDecode(startAfter, encodingType());
   }
 
   /** Returns continuation token. */
@@ -68,6 +69,19 @@ public class ListBucketResultV2 extends ListObjectsResult {
   /** Returns List of Items. */
   @Override
   public List<Contents> contents() {
-    return emptyIfNull(contents);
+    return Utils.unmodifiableList(contents);
+  }
+
+  @Override
+  public String toString() {
+    return String.format(
+        "ListBucketResultV2{%s, keyCount=%s, startAfter=%s, continuationToken=%s,"
+            + " nextContinuationToken=%s, contents=%s}",
+        super.toString(),
+        Utils.stringify(keyCount),
+        Utils.stringify(startAfter),
+        Utils.stringify(continuationToken),
+        Utils.stringify(nextContinuationToken),
+        Utils.stringify(contents));
   }
 }

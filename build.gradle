@@ -14,27 +14,22 @@
  * limitations under the License.
  */
 
-/*****************************/
-/*   gradleVersion = '8.6'   */
-/*****************************/
+/********************************/
+/*   gradleVersion = '8.14.3'   */
+/********************************/
 
 plugins {
-  id "com.github.johnrengelman.shadow" version "8.1.1"
-  id "com.github.spotbugs" version "5.2.1"
-  id "io.codearte.nexus-staging" version "0.30.0"
-  id "de.marcphilipp.nexus-publish" version "0.4.0"
-  id "com.diffplug.spotless" version "6.13.0"
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+    id 'com.github.spotbugs' version '6.1.13'
+    id 'org.jreleaser' version '1.20.0'
+    id 'com.diffplug.spotless' version '6.13.0'
 }
 
-/*
- * Root project definitions
- */
-apply plugin: 'io.codearte.nexus-staging'
-apply plugin: "de.marcphilipp.nexus-publish"
+/* Root project definitions */
 
 allprojects {
     group = 'io.minio'
-    version = '8.5.11'
+    version = '9.0.0'
     if (!project.hasProperty('release')) {
         version += '-DEV'
     }
@@ -43,7 +38,7 @@ allprojects {
 subprojects {
     apply plugin: 'java-library'
     apply plugin: 'com.github.spotbugs'
-    apply plugin: "com.diffplug.spotless"
+    apply plugin: 'com.diffplug.spotless'
 
     repositories {
         mavenLocal()
@@ -51,31 +46,31 @@ subprojects {
     }
 
     dependencies {
-        api "com.carrotsearch.thirdparty:simple-xml-safe:2.7.1"
-        api "com.google.guava:guava:33.0.0-jre"
-        api "com.squareup.okhttp3:okhttp:4.12.0"
-        api "com.fasterxml.jackson.core:jackson-annotations:2.16.1"
-        api "com.fasterxml.jackson.core:jackson-core:2.16.1"
-        api "com.fasterxml.jackson.core:jackson-databind:2.16.1"
-        api "org.bouncycastle:bcprov-jdk18on:1.78"
-        api "org.apache.commons:commons-compress:1.26.0"
-        api "commons-codec:commons-codec:1.16.1"
-        api "org.xerial.snappy:snappy-java:1.1.10.5"
-        compileOnly "com.github.spotbugs:spotbugs-annotations:4.8.3"
+        api 'com.carrotsearch.thirdparty:simple-xml-safe:2.7.1'
+        api 'com.google.guava:guava:33.5.0-jre'
+        api 'com.squareup.okhttp3:okhttp:5.2.1'
+        api 'com.fasterxml.jackson.core:jackson-annotations:2.20'
+        api 'com.fasterxml.jackson.core:jackson-core:2.20.0'
+        api 'com.fasterxml.jackson.core:jackson-databind:2.20.0'
+        api 'org.bouncycastle:bcprov-jdk18on:1.82'
+        api 'org.apache.commons:commons-compress:1.28.0'
+        api 'commons-codec:commons-codec:1.19.0'
+        api 'org.xerial.snappy:snappy-java:1.1.10.8'
+        compileOnly 'com.github.spotbugs:spotbugs-annotations:4.9.8'
 
-        testImplementation "com.squareup.okhttp3:mockwebserver:4.12.0"
-        testImplementation "junit:junit:4.13.2"
+        testImplementation 'com.squareup.okhttp3:mockwebserver:5.2.1'
+        testImplementation 'org.junit.jupiter:junit-jupiter-api:5.14.0'
     }
 
     [compileJava, compileTestJava].each() {
         it.options.fork = true
-        it.options.compilerArgs += ["-Xlint:unchecked", "-Xlint:deprecation", "-Xlint:-options", "-Werror", "-Xdiags:verbose"]
-        it.options.encoding = "UTF-8"
+        it.options.compilerArgs += ['-Xlint:unchecked', '-Xlint:deprecation', '-Xlint:-options', '-Werror', '-Xdiags:verbose']
+        it.options.encoding = 'UTF-8'
     }
 
     spotbugs {
-        effort = "max"
-        reportLevel = "low"
+        effort = com.github.spotbugs.snom.Effort.MAX
+        reportLevel = com.github.spotbugs.snom.Confidence.values()[0]
         excludeFilter = file("$rootDir/spotbugs-filter.xml")
     }
 
@@ -93,24 +88,24 @@ subprojects {
         // Show stacktrace on test failure than opening in web browser.
         testLogging {
             exceptionFormat = 'full'
-            showExceptions true
-            showCauses true
-            showStackTraces true
+            showExceptions = true
+            showCauses = true
+            showStackTraces = true
         }
     }
 
-    task localeTest(type: Test) {
-        description = "Runs tests with locale de.DE"
-        System.setProperty('user.language', 'de')
-        System.setProperty('user.country', 'DE')
-        systemProperties = System.properties
-        dependsOn test
+    tasks.register('localeTest', Test) {
+        description = 'Runs tests with locale de-DE'
+        systemProperty 'user.language', 'de'
+        systemProperty 'user.country', 'DE'
     }
 
     check.dependsOn localeTest
 
-    sourceCompatibility = JavaVersion.VERSION_1_8
-    targetCompatibility = JavaVersion.VERSION_1_8
+    java {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
 
     spotless {
         java {
@@ -130,18 +125,19 @@ project(':api') {
     apply plugin: 'maven-publish'
     apply plugin: 'signing'
     apply plugin: 'com.github.johnrengelman.shadow'
-    apply plugin: "de.marcphilipp.nexus-publish"
 
-    archivesBaseName = 'minio'
+    base {
+        archivesName = 'minio'
+    }
 
     jar {
         manifest {
-            attributes('Implementation-Title': archivesBaseName,
-                    'Implementation-Version': archiveVersion.get(),
-                    'Built-By': 'MinIO, inc',
-                    'Built-JDK': System.getProperty('java.version'),
-                    'Source-Compatibility': sourceCompatibility,
-                    'Target-Compatibility': targetCompatibility)
+            attributes('Implementation-Title': base.archivesName.get(),
+                       'Implementation-Version': archiveVersion.get(),
+                       'Built-By': 'MinIO, inc',
+                       'Built-JDK': System.getProperty('java.version'),
+                       'Source-Compatibility': sourceCompatibility,
+                       'Target-Compatibility': targetCompatibility)
         }
     }
 
@@ -168,14 +164,22 @@ project(':api') {
         }
     }
 
-    artifacts {
-        archives javadocJar, sourcesJar, shadowJar
+    tasks.named('assemble') {
+        dependsOn tasks.named('shadowJar')
+    }
+
+    tasks.withType(Jar).configureEach {
+        doLast {
+            def jarFile = archiveFile.get().asFile
+            ant.checksum algorithm: 'md5', file: jarFile
+            ant.checksum algorithm: 'sha1', file: jarFile
+        }
     }
 
     publishing {
         publications {
-            mavenJava(MavenPublication) {
-                artifactId archivesBaseName
+            minioJava(MavenPublication) {
+                artifactId = base.archivesName.get()
                 from components.java
                 pom {
                     name = 'minio'
@@ -207,28 +211,25 @@ project(':api') {
                 }
             }
         }
+
+        repositories {
+            maven {
+                name = 'LocalMavenWithChecksums'
+                url = uri(layout.buildDirectory.dir('staging-deploy'))
+            }
+
+            maven {
+                name = 'PreDeploy'
+                url = uri(layout.buildDirectory.dir('pre-deploy'))
+            }
+        }
     }
 
     signing {
-        if (project.properties.containsKey('signing.keyId')) {
-            sign publishing.publications.mavenJava
+        required {
+            gradle.taskGraph.allTasks.any { it.name.contains('LocalMavenWithChecksums') }
         }
-    }
-
-    nexusStaging {
-        packageGroup = group
-        stagingProfileId = '9b746c9f8abc1'
-        username = project.properties['nexusUsername']
-        password = project.properties['nexusPassword']
-    }
-
-    nexusPublishing {
-        repositories {
-            sonatype {
-                username = project.properties['nexusUsername']
-                password = project.properties['nexusPassword']
-            }
-        }
+        sign publishing.publications.minioJava
     }
 }
 
@@ -237,24 +238,26 @@ project(':adminapi') {
     apply plugin: 'maven-publish'
     apply plugin: 'signing'
     apply plugin: 'com.github.johnrengelman.shadow'
-    apply plugin: "de.marcphilipp.nexus-publish"
+    apply plugin: 'base'
 
-    archivesBaseName = 'minio-admin'
+    base {
+        archivesName = 'minio-admin'
+    }
 
     dependencies {
         api project(':api')
-        api "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.16.1"
+        api 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.20.0'
         testImplementation project(':api')
     }
 
     jar {
         manifest {
-            attributes('Implementation-Title': archivesBaseName,
-                    'Implementation-Version': archiveVersion.get(),
-                    'Built-By': 'MinIO, inc',
-                    'Built-JDK': System.getProperty('java.version'),
-                    'Source-Compatibility': sourceCompatibility,
-                    'Target-Compatibility': targetCompatibility)
+            attributes('Implementation-Title': base.archivesName.get(),
+                       'Implementation-Version': archiveVersion.get(),
+                       'Built-By': 'MinIO, inc',
+                       'Built-JDK': System.getProperty('java.version'),
+                       'Source-Compatibility': sourceCompatibility,
+                       'Target-Compatibility': targetCompatibility)
         }
     }
 
@@ -281,14 +284,22 @@ project(':adminapi') {
         }
     }
 
-    artifacts {
-        archives javadocJar, sourcesJar, shadowJar
+    tasks.named('assemble') {
+        dependsOn tasks.named('shadowJar')
+    }
+
+    tasks.withType(Jar).configureEach {
+        doLast {
+            def jarFile = archiveFile.get().asFile
+            ant.checksum algorithm: 'md5', file: jarFile
+            ant.checksum algorithm: 'sha1', file: jarFile
+        }
     }
 
     publishing {
         publications {
-            mavenJava(MavenPublication) {
-                artifactId archivesBaseName
+            minioJava(MavenPublication) {
+                artifactId = base.archivesName.get()
                 from components.java
                 pom {
                     name = 'minio'
@@ -320,34 +331,31 @@ project(':adminapi') {
                 }
             }
         }
+
+        repositories {
+            maven {
+                name = 'LocalMavenWithChecksums'
+                url = uri(layout.buildDirectory.dir('staging-deploy'))
+            }
+
+            maven {
+                name = 'PreDeploy'
+                url = uri(layout.buildDirectory.dir('pre-deploy'))
+            }
+        }
     }
 
     signing {
-        if (project.properties.containsKey('signing.keyId')) {
-            sign publishing.publications.mavenJava
+        required {
+            gradle.taskGraph.allTasks.any { it.name.contains('LocalMavenWithChecksums') }
         }
-    }
-
-    nexusStaging {
-        packageGroup = group
-        stagingProfileId = '9b746c9f8abc1'
-        username = project.properties['nexusUsername']
-        password = project.properties['nexusPassword']
-    }
-
-    nexusPublishing {
-        repositories {
-            sonatype {
-                username = project.properties['nexusUsername']
-                password = project.properties['nexusPassword']
-            }
-        }
+        sign publishing.publications.minioJava
     }
 }
 
 project(':examples') {
     dependencies {
-        compileOnly "me.tongfei:progressbar:0.9.5"
+        compileOnly 'me.tongfei:progressbar:0.9.5'
         compileOnly project(':api')
     }
 
@@ -363,11 +371,9 @@ project(':examples') {
     }
 }
 
-import org.gradle.internal.os.OperatingSystem;
-
 project(':functional') {
     dependencies {
-        implementation "junit:junit:4.13.2"
+        implementation 'org.junit.jupiter:junit-jupiter-api:5.14.0'
         implementation project(':api')
         implementation project(':adminapi')
     }
@@ -407,10 +413,92 @@ project(':functional') {
             ext.region = rootProject.properties['region']
         }
 
-        maxHeapSize = "4096m"
-        jvmArgs "-Xms256m"
+        maxHeapSize = '4096m'
+        jvmArgs '-Xms256m'
         if (rootProject.hasProperty('endpoint')) {
             args = [ext.endpoint, ext.accessKey, ext.secretKey, ext.region]
+        }
+    }
+}
+
+jreleaser {
+    project {
+        copyright = 'MinIO Inc.'
+        description = 'MinIO Java SDK for Amazon S3 Compatible Cloud Storage'
+    }
+
+    signing {
+        active = 'ALWAYS'
+        armored = true
+        mode = 'FILE'
+    }
+
+    deploy {
+        maven {
+             mavenCentral {
+                 sonatype {
+                     applyMavenCentralRules = true
+                     active = 'ALWAYS'
+                     url = 'https://central.sonatype.com/api/v1/publisher'
+                     username = findProperty('nexusUsername') ?: System.getenv('NEXUS_USERNAME')
+                     password = findProperty('nexusPassword') ?: System.getenv('NEXUS_PASSWORD')
+                     stagingRepository('api/build/pre-deploy')
+                 }
+             }
+            /* Legacy OSSRH
+            nexus2 {
+                'maven-central' {
+                    stagingProfileId = '9b746c9f8abc1'
+                    active = 'ALWAYS'
+                    // Use url
+                    // 'https://s01.oss.sonatype.org/service/local'
+                    // for error 'Could not find a staging profile matching …​'.
+                    // Refer https://jreleaser.org/guide/latest/examples/maven/maven-central.html#_ossrh
+                    url = project.findProperty("sonatypeUrl") ?: 'https://oss.sonatype.org/service/local'
+                    snapshotUrl = 'https://s01.oss.sonatype.org/content/repositories/snapshots/'
+                    closeRepository = true
+                    releaseRepository = project.findProperty("releaseRepository")?.toBoolean() ?: false
+                    stagingRepository('api/build/pre-deploy')
+                }
+            }
+            */
+        }
+        maven {
+             mavenCentral {
+                 sonatype {
+                     applyMavenCentralRules = true
+                     active = 'ALWAYS'
+                     url = 'https://central.sonatype.com/api/v1/publisher'
+                     username = findProperty('nexusUsername') ?: System.getenv('NEXUS_USERNAME')
+                     password = findProperty('nexusPassword') ?: System.getenv('NEXUS_PASSWORD')
+                     stagingRepository('adminapi/build/pre-deploy')
+                 }
+             }
+            /* Legacy OSSRH
+            nexus2 {
+                'maven-central' {
+                    stagingProfileId = '9b746c9f8abc1'
+                    active = 'ALWAYS'
+                    // Use url
+                    // 'https://s01.oss.sonatype.org/service/local'
+                    // for error 'Could not find a staging profile matching …​'.
+                    // Refer https://jreleaser.org/guide/latest/examples/maven/maven-central.html#_ossrh
+                    url = project.findProperty("sonatypeUrl") ?: 'https://oss.sonatype.org/service/local'
+                    snapshotUrl = 'https://s01.oss.sonatype.org/content/repositories/snapshots/'
+                    closeRepository = true
+                    releaseRepository = project.findProperty("releaseRepository")?.toBoolean() ?: false
+                    stagingRepository('adminapi/build/pre-deploy')
+                }
+            }
+            */
+        }
+    }
+
+    release {
+        github {
+            skipRelease = true
+            skipTag = true
+            token = 'placeholder-token'
         }
     }
 }

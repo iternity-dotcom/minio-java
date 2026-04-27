@@ -16,12 +16,12 @@
 
 package io.minio;
 
-/** Argument class of {@link MinioAsyncClient#bucketExists} and {@link MinioClient#bucketExists}. */
-public class BucketExistsArgs extends BucketArgs {
+/** Arguments of {@link MinioAsyncClient#bucketExists} and {@link MinioClient#bucketExists}. */
+public class BucketExistsArgs extends HeadBucketBaseArgs {
   public static Builder builder() {
     return new Builder();
   }
 
-  /** Argument builder of {@link BucketExistsArgs}. */
-  public static final class Builder extends BucketArgs.Builder<Builder, BucketExistsArgs> {}
+  /** Builder of {@link BucketExistsArgs}. */
+  public static final class Builder extends HeadBucketBaseArgs.Builder<Builder, BucketExistsArgs> {}
 }

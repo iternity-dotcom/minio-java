@@ -17,8 +17,14 @@
 
 package io.minio;
 
-import com.google.common.collect.HashMultimap;
-import com.google.common.collect.Multimap;
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonParseException;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonMappingException;
+import com.fasterxml.jackson.databind.MapperFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.io.ByteStreams;
 import io.minio.credentials.Credentials;
 import io.minio.credentials.Provider;
@@ -26,21 +32,21 @@ import io.minio.credentials.StaticProvider;
 import io.minio.errors.BucketPolicyTooLargeException;
 import io.minio.errors.ErrorResponseException;
 import io.minio.errors.InsufficientDataException;
-import io.minio.errors.InternalException;
-import io.minio.errors.InvalidResponseException;
-import io.minio.errors.ServerException;
+import io.minio.errors.MinioException;
 import io.minio.errors.XmlParserException;
-import io.minio.http.HttpUtils;
-import io.minio.http.Method;
-import io.minio.messages.Bucket;
-import io.minio.messages.CopyObjectResult;
-import io.minio.messages.CreateBucketConfiguration;
-import io.minio.messages.DeleteError;
-import io.minio.messages.DeleteObject;
+import io.minio.messages.AccessControlPolicy;
+import io.minio.messages.CORSConfiguration;
+import io.minio.messages.DeleteRequest;
+import io.minio.messages.DeleteResult;
+import io.minio.messages.GetObjectAttributesOutput;
 import io.minio.messages.Item;
 import io.minio.messages.LegalHold;
 import io.minio.messages.LifecycleConfiguration;
 import io.minio.messages.ListAllMyBucketsResult;
+import io.minio.messages.ListBucketResultV1;
+import io.minio.messages.ListBucketResultV2;
+import io.minio.messages.ListObjectsResult;
+import io.minio.messages.ListVersionsResult;
 import io.minio.messages.NotificationConfiguration;
 import io.minio.messages.NotificationRecords;
 import io.minio.messages.ObjectLockConfiguration;
@@ -55,8 +61,10 @@ import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
+import java.math.BigInteger;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -64,22 +72,32 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
-import java.security.InvalidKeyException;
-import java.security.NoSuchAlgorithmException;
+import java.time.ZonedDateTime;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Scanner;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
-import java.util.concurrent.ExecutionException;
-import java.util.regex.Matcher;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 import okhttp3.HttpUrl;
+import okhttp3.MediaType;
+import okhttp3.MultipartBody;
 import okhttp3.OkHttpClient;
-import okhttp3.Request;
 import okhttp3.Response;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
@@ -130,27 +148,102 @@ import org.xerial.snappy.SnappyFramedOutputStream;
  *         .build();
  * }</pre>
  */
-public class MinioAsyncClient extends S3Base {
+public class MinioAsyncClient extends BaseS3Client {
+  /** Argument builder of {@link MinioAsyncClient}. */
+  public static final class Builder {
+    private Http.BaseUrl baseUrl = null;
+    private String region;
+    private Provider provider;
+    private OkHttpClient httpClient;
+    private boolean closeHttpClient;
+
+    public Builder baseUrl(Http.BaseUrl baseUrl) {
+      if (baseUrl.region() == null) {
+        baseUrl.setRegion(region);
+      }
+      region = null;
+      this.baseUrl = baseUrl;
+      return this;
+    }
+
+    public Builder endpoint(String endpoint) {
+      return this.baseUrl(new Http.BaseUrl(endpoint));
+    }
+
+    public Builder endpoint(String endpoint, int port, boolean secure) {
+      return this.baseUrl(new Http.BaseUrl(endpoint, port, secure));
+    }
+
+    public Builder endpoint(URL url) {
+      return this.baseUrl(new Http.BaseUrl(url));
+    }
+
+    public Builder endpoint(HttpUrl url) {
+      return this.baseUrl(new Http.BaseUrl(url));
+    }
+
+    public Builder region(String region) {
+      if (region != null && !Utils.REGION_REGEX.matcher(region).find()) {
+        throw new IllegalArgumentException("invalid region " + region);
+      }
+      if (baseUrl != null) {
+        baseUrl.setRegion(region);
+      } else {
+        this.region = region;
+      }
+      return this;
+    }
+
+    public Builder credentials(String accessKey, String secretKey) {
+      provider = new StaticProvider(accessKey, secretKey, null);
+      return this;
+    }
+
+    public Builder credentialsProvider(Provider provider) {
+      this.provider = provider;
+      return this;
+    }
+
+    public Builder httpClient(OkHttpClient httpClient) {
+      Utils.validateNotNull(httpClient, "http client");
+      this.httpClient = httpClient;
+      return this;
+    }
+
+    public Builder httpClient(OkHttpClient httpClient, boolean close) {
+      Utils.validateNotNull(httpClient, "http client");
+      this.httpClient = httpClient;
+      this.closeHttpClient = close;
+      return this;
+    }
+
+    public MinioAsyncClient build() {
+      Utils.validateNotNull(baseUrl, "endpoint");
+
+      if (baseUrl.awsDomainSuffix() != null
+          && baseUrl.awsDomainSuffix().endsWith(".cn")
+          && !baseUrl.awsS3Prefix().endsWith("s3-accelerate.")
+          && baseUrl.region() == null) {
+        throw new IllegalArgumentException("Region missing in Amazon S3 China endpoint " + baseUrl);
+      }
+
+      if (httpClient == null) {
+        closeHttpClient = true;
+        httpClient = Http.newDefaultClient();
+      }
+
+      return new MinioAsyncClient(baseUrl, provider, httpClient, closeHttpClient);
+    }
+  }
+
+  /** Creates new {@link MinioAsyncClient.Builder}. */
+  public static Builder builder() {
+    return new Builder();
+  }
+
   private MinioAsyncClient(
-      HttpUrl baseUrl,
-      String awsS3Prefix,
-      String awsDomainSuffix,
-      boolean awsDualstack,
-      boolean useVirtualStyle,
-      String region,
-      Provider provider,
-      OkHttpClient httpClient,
-      boolean closeHttpClient) {
-    super(
-        baseUrl,
-        awsS3Prefix,
-        awsDomainSuffix,
-        awsDualstack,
-        useVirtualStyle,
-        region,
-        provider,
-        httpClient,
-        closeHttpClient);
+      Http.BaseUrl baseUrl, Provider provider, OkHttpClient httpClient, boolean closeHttpClient) {
+    super(baseUrl, provider, httpClient, closeHttpClient);
   }
 
   protected MinioAsyncClient(MinioAsyncClient client) {
@@ -197,18 +290,11 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link StatObjectArgs} object.
    * @return {@link CompletableFuture}&lt;{@link StatObjectResponse}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    * @see StatObjectResponse
    */
-  public CompletableFuture<StatObjectResponse> statObject(StatObjectArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
-    return super.statObjectAsync(args);
+  public CompletableFuture<StatObjectResponse> statObject(StatObjectArgs args) {
+    return headObject(new HeadObjectArgs(args))
+        .thenApply(response -> new StatObjectResponse(response));
   }
 
   /**
@@ -227,23 +313,17 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args Object of {@link GetObjectArgs}
    * @return {@link CompletableFuture}&lt;{@link GetObjectResponse}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    * @see GetObjectResponse
    */
-  public CompletableFuture<GetObjectResponse> getObject(GetObjectArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<GetObjectResponse> getObject(GetObjectArgs args) {
     checkArgs(args);
-    args.validateSsec(this.baseUrl);
+    args.validateSsec(this.baseUrl.isHttps());
     return executeGetAsync(
             args,
-            args.getHeaders(),
-            (args.versionId() != null) ? newMultimap("versionId", args.versionId()) : null)
+            args.makeHeaders(),
+            (args.versionId() != null)
+                ? new Http.QueryParameters("versionId", args.versionId())
+                : null)
         .thenApply(
             response -> {
               return new GetObjectResponse(
@@ -258,23 +338,23 @@ public class MinioAsyncClient extends S3Base {
   private void downloadObject(
       String filename,
       boolean overwrite,
-      StatObjectResponse statObjectResponse,
+      HeadObjectResponse headObjectResponse,
       GetObjectResponse getObjectResponse)
-      throws IOException {
+      throws MinioException {
     OutputStream os = null;
     try {
       Path filePath = Paths.get(filename);
       String tempFilename =
-          filename + "." + S3Escaper.encode(statObjectResponse.etag()) + ".part.minio";
+          filename + "." + Utils.encode(headObjectResponse.etag()) + ".part.minio";
       Path tempFilePath = Paths.get(tempFilename);
       if (Files.exists(tempFilePath)) Files.delete(tempFilePath);
       os = Files.newOutputStream(tempFilePath, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
       long bytesWritten = ByteStreams.copy(getObjectResponse, os);
-      if (bytesWritten != statObjectResponse.size()) {
+      if (bytesWritten != headObjectResponse.size()) {
         throw new IOException(
             tempFilename
                 + ": unexpected data written.  expected = "
-                + statObjectResponse.size()
+                + headObjectResponse.size()
                 + ", written = "
                 + bytesWritten);
       }
@@ -284,9 +364,15 @@ public class MinioAsyncClient extends S3Base {
       } else {
         Files.move(tempFilePath, filePath);
       }
+    } catch (IOException e) {
+      throw new MinioException(e);
     } finally {
-      getObjectResponse.close();
-      if (os != null) os.close();
+      try {
+        getObjectResponse.close();
+        if (os != null) os.close();
+      } catch (IOException e) {
+        throw new MinioException(e);
+      }
     }
   }
 
@@ -305,31 +391,23 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args Object of {@link DownloadObjectArgs}
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> downloadObject(DownloadObjectArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> downloadObject(DownloadObjectArgs args) {
     String filename = args.filename();
     Path filePath = Paths.get(filename);
     if (!args.overwrite() && Files.exists(filePath)) {
       throw new IllegalArgumentException("Destination file " + filename + " already exists");
     }
 
-    return statObjectAsync(new StatObjectArgs(args))
+    return headObject(new HeadObjectArgs(args))
         .thenCombine(
             getObject(new GetObjectArgs(args)),
-            (statObjectResponse, getObjectResponse) -> {
+            (headObjectResponse, getObjectResponse) -> {
               try {
-                downloadObject(filename, args.overwrite(), statObjectResponse, getObjectResponse);
+                downloadObject(filename, args.overwrite(), headObjectResponse, getObjectResponse);
                 return null;
-              } catch (IOException e) {
-                throw new CompletionException(e);
+              } catch (MinioException e) {
+                return Utils.failedFuture(e);
               }
             })
         .thenAccept(nullValue -> {});
@@ -346,7 +424,7 @@ public class MinioAsyncClient extends S3Base {
    *         .bucket("my-bucketname")
    *         .object("my-objectname")
    *         .source(
-   *             CopySource.builder()
+   *             SourceObject.builder()
    *                 .bucket("my-source-bucketname")
    *                 .object("my-objectname")
    *                 .build())
@@ -359,7 +437,7 @@ public class MinioAsyncClient extends S3Base {
    *         .bucket("my-bucketname")
    *         .object("my-objectname")
    *         .source(
-   *             CopySource.builder()
+   *             SourceObject.builder()
    *                 .bucket("my-source-bucketname")
    *                 .object("my-source-objectname")
    *                 .build())
@@ -372,7 +450,7 @@ public class MinioAsyncClient extends S3Base {
    *         .bucket("my-bucketname")
    *         .object("my-objectname")
    *         .source(
-   *             CopySource.builder()
+   *             SourceObject.builder()
    *                 .bucket("my-source-bucketname")
    *                 .object("my-objectname")
    *                 .build())
@@ -386,7 +464,7 @@ public class MinioAsyncClient extends S3Base {
    *         .bucket("my-bucketname")
    *         .object("my-objectname")
    *         .source(
-   *             CopySource.builder()
+   *             SourceObject.builder()
    *                 .bucket("my-source-bucketname")
    *                 .object("my-objectname")
    *                 .build())
@@ -400,7 +478,7 @@ public class MinioAsyncClient extends S3Base {
    *         .bucket("my-bucketname")
    *         .object("my-objectname")
    *         .source(
-   *             CopySource.builder()
+   *             SourceObject.builder()
    *                 .bucket("my-source-bucketname")
    *                 .object("my-objectname")
    *                 .build())
@@ -414,7 +492,7 @@ public class MinioAsyncClient extends S3Base {
    *         .bucket("my-bucketname")
    *         .object("my-objectname")
    *         .source(
-   *             CopySource.builder()
+   *             SourceObject.builder()
    *                 .bucket("my-source-bucketname")
    *                 .object("my-source-objectname")
    *                 .ssec(ssec) // Replace with actual key.
@@ -428,7 +506,7 @@ public class MinioAsyncClient extends S3Base {
    *         .bucket("my-bucketname")
    *         .object("my-objectname")
    *         .source(
-   *             CopySource.builder()
+   *             SourceObject.builder()
    *                 .bucket("my-source-bucketname")
    *                 .object("my-objectname")
    *                 .matchETag(etag) // Replace with actual etag.
@@ -439,132 +517,252 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link CopyObjectArgs} object.
    * @return {@link CompletableFuture}&lt;{@link ObjectWriteResponse}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<ObjectWriteResponse> copyObject(CopyObjectArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<ObjectWriteResponse> copyObject(CopyObjectArgs args) {
     checkArgs(args);
-    args.validateSse(this.baseUrl);
+    args.validateSse(this.baseUrl.isHttps());
 
-    return CompletableFuture.supplyAsync(
-            () -> args.source().offset() != null && args.source().length() != null)
+    CompletableFuture<HeadObjectResponse> future =
+        args.source().objectSize() == null
+            ? headObject(new HeadObjectArgs(args.source()))
+            : CompletableFuture.completedFuture((HeadObjectResponse) null);
+    return future
+        .thenApply(
+            response ->
+                response == null
+                    ? args
+                    : new CopyObjectArgs(
+                        args, new SourceObject(args.source(), response.size(), response.etag())))
         .thenCompose(
-            condition -> {
-              if (condition) {
-                try {
-                  return statObjectAsync(new StatObjectArgs((ObjectReadArgs) args.source()));
-                } catch (InsufficientDataException
-                    | InternalException
-                    | InvalidKeyException
-                    | IOException
-                    | NoSuchAlgorithmException
-                    | XmlParserException e) {
-                  throw new CompletionException(e);
-                }
+            copyArgs -> {
+              long size = copyArgs.source().objectSize();
+              if (size < ObjectWriteArgs.MAX_PART_SIZE
+                  && copyArgs.source().offset() == null
+                  && copyArgs.source().length() == null) {
+                return super.copyObject(copyArgs);
               }
-              return CompletableFuture.completedFuture(null);
-            })
-        .thenApply(stat -> (stat == null) ? (long) -1 : stat.size())
-        .thenCompose(
-            size -> {
-              if (args.source().offset() != null
-                  || args.source().length() != null
-                  || size > ObjectWriteArgs.MAX_PART_SIZE) {
-                if (args.metadataDirective() != null
-                    && args.metadataDirective() == Directive.COPY) {
+
+              if (size > ObjectWriteArgs.MAX_PART_SIZE) {
+                if (copyArgs.metadataDirective() == Directive.COPY) {
                   throw new IllegalArgumentException(
-                      "COPY metadata directive is not applicable to source object size greater than"
-                          + " 5 GiB");
-                }
-                if (args.taggingDirective() != null && args.taggingDirective() == Directive.COPY) {
-                  throw new IllegalArgumentException(
-                      "COPY tagging directive is not applicable to source object size greater than"
-                          + " 5 GiB");
-                }
-
-                try {
-                  return composeObject(new ComposeObjectArgs(args));
-                } catch (InsufficientDataException
-                    | InternalException
-                    | InvalidKeyException
-                    | IOException
-                    | NoSuchAlgorithmException
-                    | XmlParserException e) {
-                  throw new CompletionException(e);
+                      "COPY metadata directive is not applicable to source object size greater"
+                          + " than 5 GiB");
                 }
               }
-              return CompletableFuture.completedFuture(null);
-            })
-        .thenCompose(
-            objectWriteResponse -> {
-              if (objectWriteResponse != null) {
-                return CompletableFuture.completedFuture(objectWriteResponse);
+              if (copyArgs.taggingDirective() == Directive.COPY) {
+                throw new IllegalArgumentException(
+                    "COPY tagging directive is not applicable to source object size greater than"
+                        + " 5 GiB");
               }
 
-              Multimap<String, String> headers = args.genHeaders();
-
-              if (args.metadataDirective() != null) {
-                headers.put("x-amz-metadata-directive", args.metadataDirective().name());
-              }
-
-              if (args.taggingDirective() != null) {
-                headers.put("x-amz-tagging-directive", args.taggingDirective().name());
-              }
-
-              headers.putAll(args.source().genCopyHeaders());
-
-              try {
-                return executePutAsync(args, headers, null, null, 0)
-                    .thenApply(
-                        response -> {
-                          try {
-                            CopyObjectResult result =
-                                Xml.unmarshal(CopyObjectResult.class, response.body().charStream());
-                            return new ObjectWriteResponse(
-                                response.headers(),
-                                args.bucket(),
-                                args.region(),
-                                args.object(),
-                                result.etag(),
-                                response.header("x-amz-version-id"));
-                          } catch (XmlParserException e) {
-                            throw new CompletionException(e);
-                          } finally {
-                            response.close();
-                          }
-                        });
-              } catch (InsufficientDataException
-                  | InternalException
-                  | InvalidKeyException
-                  | IOException
-                  | NoSuchAlgorithmException
-                  | XmlParserException e) {
-                throw new CompletionException(e);
-              }
+              return composeObject(new ComposeObjectArgs(copyArgs));
             });
   }
 
-  private CompletableFuture<Part[]> uploadPartCopy(
-      String bucketName,
-      String region,
-      String objectName,
-      String uploadId,
-      int partNumber,
-      Multimap<String, String> headers,
-      Part[] parts)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
-    return uploadPartCopyAsync(bucketName, region, objectName, uploadId, partNumber, headers, null)
-        .thenApply(
-            uploadPartCopyResponse -> {
-              parts[partNumber - 1] = new Part(partNumber, uploadPartCopyResponse.result().etag());
-              return parts;
+  /** Calculates part count for given list of {@link SourceObject}. */
+  protected CompletableFuture<Integer> calculatePartCount(List<SourceObject> sources) {
+    long[] objectSize = {0};
+
+    CompletableFuture<Integer> completableFuture = supplyAsync(() -> 0);
+
+    int sourceSize = sources.size();
+    for (int i = 0; i < sourceSize; i++) {
+      final int index = i;
+      final boolean interimPart = sourceSize != 1 && sourceSize != (i + 1);
+
+      CompletableFuture<HeadObjectResponse> future =
+          sources.get(index).objectSize() == null
+              ? headObject(new HeadObjectArgs(sources.get(index)))
+              : CompletableFuture.completedFuture((HeadObjectResponse) null);
+      completableFuture =
+          completableFuture.thenCombine(
+              future,
+              (partCount, response) -> {
+                SourceObject source = sources.get(index);
+                if (response != null) {
+                  source = new SourceObject(source, response.size(), response.etag());
+                  sources.set(index, source);
+                }
+
+                List<String> keys =
+                    new ArrayList<>(
+                        Arrays.asList("source", source.bucket() + "/" + source.object()));
+                if (source.versionId() != null && !source.versionId().isEmpty()) {
+                  keys.add("version_id=" + source.versionId());
+                }
+                if (source.offset() != null) keys.add("offset=" + source.offset());
+                if (source.length() != null) keys.add("length=" + source.length());
+                String sourceMessage = String.join(" ", keys);
+                if ((source.offset() != null ? source.offset() : 0) >= source.objectSize()) {
+                  throw new IllegalArgumentException(
+                      "source "
+                          + sourceMessage
+                          + ": offset is beyond object size "
+                          + source.objectSize());
+                }
+
+                long size = source.objectSize() - (source.offset() != null ? source.offset() : 0);
+
+                if (size < (source.length() != null ? source.length() : 0)) {
+                  throw new IllegalArgumentException(
+                      "source "
+                          + sourceMessage
+                          + ": insufficient object size "
+                          + source.objectSize());
+                }
+                size = source.length() != null ? source.length() : size;
+                if (interimPart && size < ObjectWriteArgs.MIN_MULTIPART_SIZE) {
+                  throw new IllegalArgumentException(
+                      "source "
+                          + sourceMessage
+                          + ": size "
+                          + size
+                          + " must be greater than "
+                          + ObjectWriteArgs.MIN_MULTIPART_SIZE);
+                }
+
+                objectSize[0] += size;
+                if (objectSize[0] > ObjectWriteArgs.MAX_OBJECT_SIZE) {
+                  throw new IllegalArgumentException(
+                      "source objects yield destination object size greater than "
+                          + ObjectWriteArgs.MAX_OBJECT_SIZE);
+                }
+
+                if (size > ObjectWriteArgs.MAX_PART_SIZE) {
+                  long count = size / ObjectWriteArgs.MAX_PART_SIZE;
+                  long lastPartSize = size - (count * ObjectWriteArgs.MAX_PART_SIZE);
+                  if (lastPartSize > 0) {
+                    count++;
+                  } else {
+                    lastPartSize = ObjectWriteArgs.MAX_PART_SIZE;
+                  }
+
+                  if (lastPartSize < ObjectWriteArgs.MIN_MULTIPART_SIZE && interimPart) {
+                    throw new IllegalArgumentException(
+                        "source "
+                            + sourceMessage
+                            + ": multipart split upload for "
+                            + size
+                            + " yields last part size less than "
+                            + ObjectWriteArgs.MIN_MULTIPART_SIZE);
+                  }
+                  partCount += (int) count;
+                } else {
+                  partCount++;
+                }
+
+                if (partCount > ObjectWriteArgs.MAX_MULTIPART_COUNT) {
+                  throw new IllegalArgumentException(
+                      "source objects yield multipart count "
+                          + partCount
+                          + " more than allowed multipart count "
+                          + ObjectWriteArgs.MAX_MULTIPART_COUNT);
+                }
+                return partCount;
+              });
+    }
+
+    return completableFuture;
+  }
+
+  private CompletableFuture<Part[]> uploadParts(
+      ComposeObjectArgs args, int partCount, String uploadId) {
+    Http.Headers ssecHeaders =
+        (args.sse() != null && args.sse() instanceof ServerSideEncryption.CustomerKey)
+            ? args.sse().headers()
+            : null;
+
+    int partNumber = 0;
+    CompletableFuture<Part[]> future = supplyAsync(() -> new Part[partCount]);
+    for (SourceObject source : args.sources()) {
+      long size = source.objectSize();
+      if (source.length() != null) {
+        size = source.length();
+      } else if (source.offset() != null) {
+        size -= source.offset();
+      }
+
+      long offset = source.offset() == null ? 0 : source.offset();
+      Http.Headers sourceHeaders = null;
+      try {
+        sourceHeaders = source.headers();
+      } catch (MinioException e) {
+        return Utils.failedFuture(e);
+      }
+      final Http.Headers headers = Http.Headers.merge(sourceHeaders, ssecHeaders);
+
+      if (size <= ObjectWriteArgs.MAX_PART_SIZE) {
+        partNumber++;
+        if (source.length() != null) {
+          headers.put(
+              Http.Headers.X_AMZ_COPY_SOURCE_RANGE,
+              "bytes=" + offset + "-" + (offset + source.length() - 1));
+        } else if (source.offset() != null) {
+          headers.put(
+              Http.Headers.X_AMZ_COPY_SOURCE_RANGE, "bytes=" + offset + "-" + (offset + size - 1));
+        }
+
+        final int finalPartNumber = partNumber;
+        future =
+            future.thenCombine(
+                uploadPartCopy(new UploadPartCopyArgs(args, uploadId, finalPartNumber, headers)),
+                (parts, response) -> {
+                  parts[response.partNumber() - 1] = response.part();
+                  return parts;
+                });
+        continue;
+      }
+
+      while (size > 0) {
+        partNumber++;
+
+        long length = Math.min(size, ObjectWriteArgs.MAX_PART_SIZE);
+        long endBytes = offset + length - 1;
+
+        Http.Headers finalHeaders =
+            new Http.Headers(
+                Http.Headers.X_AMZ_COPY_SOURCE_RANGE, "bytes=" + offset + "-" + endBytes);
+        finalHeaders.putAll(headers);
+
+        final int finalPartNumber = partNumber;
+        future =
+            future.thenCombine(
+                uploadPartCopy(new UploadPartCopyArgs(args, uploadId, finalPartNumber, headers)),
+                (parts, response) -> {
+                  parts[response.partNumber() - 1] = response.part();
+                  return parts;
+                });
+        offset += length;
+        size -= length;
+      }
+    }
+
+    return future;
+  }
+
+  private CompletableFuture<ObjectWriteResponse> composeObject(
+      ComposeObjectArgs args, int partCount) {
+    String[] uploadId = {null};
+    return createMultipartUpload(new CreateMultipartUploadArgs(args))
+        .thenCompose(
+            response -> {
+              uploadId[0] = response.result().uploadId();
+              return uploadParts(args, partCount, uploadId[0]);
+            })
+        .thenCompose(
+            parts ->
+                completeMultipartUpload(new CompleteMultipartUploadArgs(args, uploadId[0], parts)))
+        .exceptionally(
+            e -> {
+              e = e.getCause();
+              if (uploadId[0] != null) {
+                try {
+                  abortMultipartUpload(new AbortMultipartUploadArgs(args, uploadId[0])).join();
+                } catch (CompletionException ex) {
+                  e.addSuppressed(ex.getCause());
+                }
+              }
+              throw new CompletionException(e);
             });
   }
 
@@ -572,14 +770,14 @@ public class MinioAsyncClient extends S3Base {
    * Creates an object by combining data from different source objects using server-side copy.
    *
    * <pre>Example:{@code
-   * List<ComposeSource> sourceObjectList = new ArrayList<ComposeSource>();
+   * List<SourceObject> sourceObjectList = new ArrayList<SourceObject>();
    *
    * sourceObjectList.add(
-   *    ComposeSource.builder().bucket("my-job-bucket").object("my-objectname-part-one").build());
+   *    SourceObject.builder().bucket("my-job-bucket").object("my-objectname-part-one").build());
    * sourceObjectList.add(
-   *    ComposeSource.builder().bucket("my-job-bucket").object("my-objectname-part-two").build());
+   *    SourceObject.builder().bucket("my-job-bucket").object("my-objectname-part-two").build());
    * sourceObjectList.add(
-   *    ComposeSource.builder().bucket("my-job-bucket").object("my-objectname-part-three").build());
+   *    SourceObject.builder().bucket("my-job-bucket").object("my-objectname-part-three").build());
    *
    * // Create my-bucketname/my-objectname by combining source object list.
    * CompletableFuture<ObjectWriteResponse> future = minioAsyncClient.composeObject(
@@ -615,246 +813,20 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link ComposeObjectArgs} object.
    * @return {@link CompletableFuture}&lt;{@link ObjectWriteResponse}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<ObjectWriteResponse> composeObject(ComposeObjectArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<ObjectWriteResponse> composeObject(ComposeObjectArgs args) {
     checkArgs(args);
-    args.validateSse(this.baseUrl);
-    List<ComposeSource> sources = args.sources();
-    int[] partCount = {0};
-    String[] uploadIdCopy = {null};
+    args.validateSse(this.baseUrl.isHttps());
 
-    return calculatePartCountAsync(sources)
-        .thenApply(
-            count -> {
-              partCount[0] = count;
-              return (count == 1
+    return calculatePartCount(args.sources())
+        .thenCompose(
+            partCount -> {
+              if (partCount == 1
                   && args.sources().get(0).offset() == null
-                  && args.sources().get(0).length() == null);
-            })
-        .thenCompose(
-            copyObjectFlag -> {
-              if (copyObjectFlag) {
-                try {
-                  return copyObject(new CopyObjectArgs(args));
-                } catch (InsufficientDataException
-                    | InternalException
-                    | InvalidKeyException
-                    | IOException
-                    | NoSuchAlgorithmException
-                    | XmlParserException e) {
-                  throw new CompletionException(e);
-                }
+                  && args.sources().get(0).length() == null) {
+                return copyObject(new CopyObjectArgs(args));
               }
-              return CompletableFuture.completedFuture(null);
-            })
-        .thenCompose(
-            objectWriteResponse -> {
-              if (objectWriteResponse != null) {
-                return CompletableFuture.completedFuture(objectWriteResponse);
-              }
-
-              CompletableFuture<ObjectWriteResponse> completableFuture =
-                  CompletableFuture.supplyAsync(
-                          () -> {
-                            Multimap<String, String> headers = newMultimap(args.extraHeaders());
-                            headers.putAll(args.genHeaders());
-                            return headers;
-                          })
-                      .thenCompose(
-                          headers -> {
-                            try {
-                              return createMultipartUploadAsync(
-                                  args.bucket(),
-                                  args.region(),
-                                  args.object(),
-                                  headers,
-                                  args.extraQueryParams());
-                            } catch (InsufficientDataException
-                                | InternalException
-                                | InvalidKeyException
-                                | IOException
-                                | NoSuchAlgorithmException
-                                | XmlParserException e) {
-                              throw new CompletionException(e);
-                            }
-                          })
-                      .thenApply(
-                          createMultipartUploadResponse -> {
-                            String uploadId = createMultipartUploadResponse.result().uploadId();
-                            uploadIdCopy[0] = uploadId;
-                            return uploadId;
-                          })
-                      .thenCompose(
-                          uploadId -> {
-                            Multimap<String, String> ssecHeaders = HashMultimap.create();
-                            if (args.sse() != null
-                                && args.sse() instanceof ServerSideEncryptionCustomerKey) {
-                              ssecHeaders.putAll(newMultimap(args.sse().headers()));
-                            }
-
-                            int partNumber = 0;
-                            CompletableFuture<Part[]> future =
-                                CompletableFuture.supplyAsync(
-                                    () -> {
-                                      return new Part[partCount[0]];
-                                    });
-                            for (ComposeSource src : sources) {
-                              long size = 0;
-                              try {
-                                size = src.objectSize();
-                              } catch (InternalException e) {
-                                throw new CompletionException(e);
-                              }
-                              if (src.length() != null) {
-                                size = src.length();
-                              } else if (src.offset() != null) {
-                                size -= src.offset();
-                              }
-                              long offset = 0;
-                              if (src.offset() != null) offset = src.offset();
-
-                              final Multimap<String, String> headers;
-                              try {
-                                headers = newMultimap(src.headers());
-                              } catch (InternalException e) {
-                                throw new CompletionException(e);
-                              }
-                              headers.putAll(ssecHeaders);
-
-                              if (size <= ObjectWriteArgs.MAX_PART_SIZE) {
-                                partNumber++;
-                                if (src.length() != null) {
-                                  headers.put(
-                                      "x-amz-copy-source-range",
-                                      "bytes=" + offset + "-" + (offset + src.length() - 1));
-                                } else if (src.offset() != null) {
-                                  headers.put(
-                                      "x-amz-copy-source-range",
-                                      "bytes=" + offset + "-" + (offset + size - 1));
-                                }
-
-                                final int partNum = partNumber;
-                                future =
-                                    future.thenCompose(
-                                        parts -> {
-                                          try {
-                                            return uploadPartCopy(
-                                                args.bucket(),
-                                                args.region(),
-                                                args.object(),
-                                                uploadId,
-                                                partNum,
-                                                headers,
-                                                parts);
-                                          } catch (InsufficientDataException
-                                              | InternalException
-                                              | InvalidKeyException
-                                              | IOException
-                                              | NoSuchAlgorithmException
-                                              | XmlParserException e) {
-                                            throw new CompletionException(e);
-                                          }
-                                        });
-                                continue;
-                              }
-
-                              while (size > 0) {
-                                partNumber++;
-
-                                long startBytes = offset;
-                                long endBytes = startBytes + ObjectWriteArgs.MAX_PART_SIZE;
-                                if (size < ObjectWriteArgs.MAX_PART_SIZE)
-                                  endBytes = startBytes + size;
-
-                                Multimap<String, String> headersCopy = newMultimap(headers);
-                                headersCopy.put(
-                                    "x-amz-copy-source-range",
-                                    "bytes=" + startBytes + "-" + endBytes);
-
-                                final int partNum = partNumber;
-                                future =
-                                    future.thenCompose(
-                                        parts -> {
-                                          try {
-                                            return uploadPartCopy(
-                                                args.bucket(),
-                                                args.region(),
-                                                args.object(),
-                                                uploadId,
-                                                partNum,
-                                                headersCopy,
-                                                parts);
-                                          } catch (InsufficientDataException
-                                              | InternalException
-                                              | InvalidKeyException
-                                              | IOException
-                                              | NoSuchAlgorithmException
-                                              | XmlParserException e) {
-                                            throw new CompletionException(e);
-                                          }
-                                        });
-                                offset = startBytes;
-                                size -= (endBytes - startBytes);
-                              }
-                            }
-
-                            return future;
-                          })
-                      .thenCompose(
-                          parts -> {
-                            try {
-                              return completeMultipartUploadAsync(
-                                  args.bucket(),
-                                  args.region(),
-                                  args.object(),
-                                  uploadIdCopy[0],
-                                  parts,
-                                  null,
-                                  null);
-                            } catch (InsufficientDataException
-                                | InternalException
-                                | InvalidKeyException
-                                | IOException
-                                | NoSuchAlgorithmException
-                                | XmlParserException e) {
-                              throw new CompletionException(e);
-                            }
-                          });
-
-              completableFuture.exceptionally(
-                  e -> {
-                    if (uploadIdCopy[0] != null) {
-                      try {
-                        abortMultipartUploadAsync(
-                                args.bucket(),
-                                args.region(),
-                                args.object(),
-                                uploadIdCopy[0],
-                                null,
-                                null)
-                            .get();
-                      } catch (InsufficientDataException
-                          | InternalException
-                          | InvalidKeyException
-                          | IOException
-                          | NoSuchAlgorithmException
-                          | XmlParserException
-                          | InterruptedException
-                          | ExecutionException ex) {
-                        throw new CompletionException(ex);
-                      }
-                    }
-                    throw new CompletionException(e);
-                  });
-              return completableFuture;
+              return composeObject(args, partCount);
             });
   }
 
@@ -867,7 +839,7 @@ public class MinioAsyncClient extends S3Base {
    * String url =
    *    minioAsyncClient.getPresignedObjectUrl(
    *        GetPresignedObjectUrlArgs.builder()
-   *            .method(Method.DELETE)
+   *            .method(Http.Method.DELETE)
    *            .bucket("my-bucketname")
    *            .object("my-objectname")
    *            .expiry(24 * 60 * 60)
@@ -882,7 +854,7 @@ public class MinioAsyncClient extends S3Base {
    * String url =
    *    minioAsyncClient.getPresignedObjectUrl(
    *        GetPresignedObjectUrlArgs.builder()
-   *            .method(Method.PUT)
+   *            .method(Http.Method.PUT)
    *            .bucket("my-bucketname")
    *            .object("my-objectname")
    *            .expiry(1, TimeUnit.DAYS)
@@ -895,7 +867,7 @@ public class MinioAsyncClient extends S3Base {
    * String url =
    *    minioAsyncClient.getPresignedObjectUrl(
    *        GetPresignedObjectUrlArgs.builder()
-   *            .method(Method.GET)
+   *            .method(Http.Method.GET)
    *            .bucket("my-bucketname")
    *            .object("my-objectname")
    *            .expiry(2, TimeUnit.HOURS)
@@ -905,56 +877,36 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link GetPresignedObjectUrlArgs} object.
    * @return String - URL string.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
-   * @throws ServerException
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public String getPresignedObjectUrl(GetPresignedObjectUrlArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          XmlParserException, ServerException {
+  public String getPresignedObjectUrl(GetPresignedObjectUrlArgs args) throws MinioException {
     checkArgs(args);
-
-    byte[] body =
-        (args.method() == Method.PUT || args.method() == Method.POST) ? HttpUtils.EMPTY_BODY : null;
-
-    Multimap<String, String> queryParams = newMultimap(args.extraQueryParams());
-    if (args.versionId() != null) queryParams.put("versionId", args.versionId());
 
     String region = null;
     try {
-      region = getRegionAsync(args.bucket(), args.region()).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      throwEncapsulatedException(e);
+      region = getRegion(args.bucket(), args.region()).join();
+    } catch (CompletionException e) {
+      throwMinioException(e);
     }
 
-    if (provider == null) {
-      HttpUrl url = buildUrl(args.method(), args.bucket(), args.object(), region, queryParams);
-      return url.toString();
+    Http.QueryParameters queryParams = new Http.QueryParameters();
+    if (args.versionId() == null) queryParams.put("versionId", args.versionId());
+
+    Credentials credentials = provider == null ? null : provider.fetch();
+    if (credentials != null && credentials.sessionToken() != null) {
+      queryParams.put(Http.Headers.X_AMZ_SECURITY_TOKEN, credentials.sessionToken());
     }
 
-    Credentials creds = provider.fetch();
-    if (creds.sessionToken() != null) queryParams.put("X-Amz-Security-Token", creds.sessionToken());
-    HttpUrl url = buildUrl(args.method(), args.bucket(), args.object(), region, queryParams);
-    Request request =
-        createRequest(
-            url,
-            args.method(),
-            args.extraHeaders() == null ? null : httpHeaders(args.extraHeaders()),
-            body,
-            0,
-            creds);
-    url = Signer.presignV4(request, region, creds.accessKey(), creds.secretKey(), args.expiry());
-    return url.toString();
+    return Http.S3Request.builder()
+        .userAgent(userAgent)
+        .method(args.method())
+        .args(args)
+        .queryParams(queryParams)
+        .build()
+        .toPresignedRequest(baseUrl, region, credentials, args.expiry())
+        .httpRequest()
+        .url()
+        .toString();
   }
 
   /**
@@ -1004,21 +956,10 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param policy Post policy of an object.
    * @return {@code Map<String, String>} - Contains form-data to upload an object using POST method.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    * @see PostPolicy
    */
-  public Map<String, String> getPresignedPostFormData(PostPolicy policy)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public Map<String, String> getPresignedPostFormData(PostPolicy policy) throws MinioException {
     if (provider == null) {
       throw new IllegalArgumentException(
           "Anonymous access does not require presigned post form-data");
@@ -1026,11 +967,9 @@ public class MinioAsyncClient extends S3Base {
 
     String region = null;
     try {
-      region = getRegionAsync(policy.bucket(), null).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      throwEncapsulatedException(e);
+      region = getRegion(policy.bucket(), null).join();
+    } catch (CompletionException e) {
+      throwMinioException(e);
     }
     return policy.formData(provider.fetch(), region);
   }
@@ -1063,26 +1002,17 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link RemoveObjectArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> removeObject(RemoveObjectArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> removeObject(RemoveObjectArgs args) {
     checkArgs(args);
     return executeDeleteAsync(
             args,
             args.bypassGovernanceMode()
-                ? newMultimap("x-amz-bypass-governance-retention", "true")
+                ? new Http.Headers("x-amz-bypass-governance-retention", "true")
                 : null,
-            (args.versionId() != null) ? newMultimap("versionId", args.versionId()) : null)
+            (args.versionId() != null)
+                ? new Http.QueryParameters("versionId", args.versionId())
+                : null)
         .thenAccept(response -> response.close());
   }
 
@@ -1091,39 +1021,40 @@ public class MinioAsyncClient extends S3Base {
    * removal.
    *
    * <pre>Example:{@code
-   * List<DeleteObject> objects = new LinkedList<>();
+   * List<DeleteObject> objects = new ArrayList<>();
    * objects.add(new DeleteObject("my-objectname1"));
    * objects.add(new DeleteObject("my-objectname2"));
    * objects.add(new DeleteObject("my-objectname3"));
-   * Iterable<Result<DeleteError>> results =
+   * Iterable<Result<DeleteResult.Error>> results =
    *     minioAsyncClient.removeObjects(
    *         RemoveObjectsArgs.builder().bucket("my-bucketname").objects(objects).build());
-   * for (Result<DeleteError> result : results) {
-   *   DeleteError error = errorResult.get();
+   * for (Result<DeleteResult.Error> result : results) {
+   *   DeleteResult.Error error = result.get();
    *   System.out.println(
    *       "Error in deleting object " + error.objectName() + "; " + error.message());
    * }
    * }</pre>
    *
    * @param args {@link RemoveObjectsArgs} object.
-   * @return {@code Iterable<Result<DeleteError>>} - Lazy iterator contains object removal status.
+   * @return {@code Iterable<Result<DeleteResult.Error>>} - Lazy iterator contains object removal
+   *     status.
    */
-  public Iterable<Result<DeleteError>> removeObjects(RemoveObjectsArgs args) {
+  public Iterable<Result<DeleteResult.Error>> removeObjects(RemoveObjectsArgs args) {
     checkArgs(args);
 
-    return new Iterable<Result<DeleteError>>() {
+    return new Iterable<Result<DeleteResult.Error>>() {
       @Override
-      public Iterator<Result<DeleteError>> iterator() {
-        return new Iterator<Result<DeleteError>>() {
-          private Result<DeleteError> error = null;
-          private Iterator<DeleteError> errorIterator = null;
+      public Iterator<Result<DeleteResult.Error>> iterator() {
+        return new Iterator<Result<DeleteResult.Error>>() {
+          private Result<DeleteResult.Error> error = null;
+          private Iterator<DeleteResult.Error> errorIterator = null;
           private boolean completed = false;
-          private Iterator<DeleteObject> objectIter = args.objects().iterator();
+          private Iterator<DeleteRequest.Object> objectIter = args.objects().iterator();
 
           private void setError() {
             error = null;
             while (errorIterator.hasNext()) {
-              DeleteError deleteError = errorIterator.next();
+              DeleteResult.Error deleteError = errorIterator.next();
               if (!"NoSuchVersion".equals(deleteError.code())) {
                 error = new Result<>(deleteError);
                 break;
@@ -1137,7 +1068,7 @@ public class MinioAsyncClient extends S3Base {
             }
 
             try {
-              List<DeleteObject> objectList = new LinkedList<>();
+              List<DeleteRequest.Object> objectList = new ArrayList<>();
               while (objectIter.hasNext() && objectList.size() < 1000) {
                 objectList.add(objectIter.next());
               }
@@ -1147,34 +1078,26 @@ public class MinioAsyncClient extends S3Base {
               DeleteObjectsResponse response = null;
               try {
                 response =
-                    deleteObjectsAsync(
-                            args.bucket(),
-                            args.region(),
-                            objectList,
-                            true,
-                            args.bypassGovernanceMode(),
-                            args.extraHeaders(),
-                            args.extraQueryParams())
-                        .get();
-              } catch (InterruptedException e) {
-                throw new RuntimeException(e);
-              } catch (ExecutionException e) {
-                throwEncapsulatedException(e);
+                    deleteObjects(
+                            DeleteObjectsArgs.builder()
+                                .extraHeaders(args.extraHeaders())
+                                .extraQueryParams(args.extraQueryParams())
+                                .bucket(args.bucket())
+                                .region(args.region())
+                                .objects(objectList)
+                                .quiet(true)
+                                .bypassGovernanceMode(args.bypassGovernanceMode())
+                                .build())
+                        .join();
+              } catch (CompletionException e) {
+                throwMinioException(e);
               }
-              if (!response.result().errorList().isEmpty()) {
-                errorIterator = response.result().errorList().iterator();
+              if (!response.result().errors().isEmpty()) {
+                errorIterator = response.result().errors().iterator();
                 setError();
                 completed = true;
               }
-            } catch (ErrorResponseException
-                | InsufficientDataException
-                | InternalException
-                | InvalidKeyException
-                | InvalidResponseException
-                | IOException
-                | NoSuchAlgorithmException
-                | ServerException
-                | XmlParserException e) {
+            } catch (MinioException e) {
               error = new Result<>(e);
               completed = true;
             }
@@ -1195,11 +1118,11 @@ public class MinioAsyncClient extends S3Base {
           }
 
           @Override
-          public Result<DeleteError> next() {
+          public Result<DeleteResult.Error> next() {
             if (!hasNext()) throw new NoSuchElementException();
 
             if (this.error != null) {
-              Result<DeleteError> error = this.error;
+              Result<DeleteResult.Error> error = this.error;
               this.error = null;
               return error;
             }
@@ -1241,18 +1164,16 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link RestoreObjectArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> restoreObject(RestoreObjectArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> restoreObject(RestoreObjectArgs args) {
     checkArgs(args);
-    return executePostAsync(args, null, newMultimap("restore", ""), args.request())
+    Http.Body body = null;
+    try {
+      body = new Http.Body(args.request(), null, null, null);
+    } catch (MinioException e) {
+      return Utils.failedFuture(e);
+    }
+    return executePostAsync(args, null, new Http.QueryParameters("restore", ""), body)
         .thenAccept(response -> response.close());
   }
 
@@ -1297,73 +1218,153 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args Instance of {@link ListObjectsArgs} built using the builder
    * @return {@code Iterable<Result<Item>>} - Lazy iterator contains object information.
-   * @throws XmlParserException upon parsing response xml
    */
   public Iterable<Result<Item>> listObjects(ListObjectsArgs args) {
     if (args.includeVersions() || args.versionIdMarker() != null) {
-      return listObjectVersions(args);
+      return objectVersionLister(new ListObjectVersionsArgs(args));
     }
 
     if (args.useApiVersion1()) {
-      return listObjectsV1(args);
+      return objectV1Lister(new ListObjectsV1Args(args));
     }
 
-    return listObjectsV2(args);
+    return objectV2Lister(new ListObjectsV2Args(args));
   }
 
   /**
    * Lists bucket information of all buckets.
    *
    * <pre>Example:{@code
-   * CompletableFuture<List<Bucket>> future = minioAsyncClient.listBuckets();
+   * CompletableFuture<List<ListAllMyBucketsResult.Bucket>> future = minioAsyncClient.listBuckets();
    * }</pre>
    *
-   * @return {@link CompletableFuture}&lt;{@link List}&lt;{@link Bucket}&gt;&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @return {@link CompletableFuture}&lt;{@link List}&lt;{@link
+   *     ListAllMyBucketsResult.Bucket}&gt;&gt; object.
    */
-  public CompletableFuture<List<Bucket>> listBuckets()
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
-    return listBuckets(ListBucketsArgs.builder().build());
-  }
-
-  /**
-   * Lists bucket information of all buckets.
-   *
-   * <pre>Example:{@code
-   * CompletableFuture<List<Bucket>> future =
-   *     minioAsyncClient.listBuckets(ListBucketsArgs.builder().extraHeaders(headers).build());
-   * }</pre>
-   *
-   * @return {@link CompletableFuture}&lt;{@link List}&lt;{@link Bucket}&gt;&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
-   */
-  public CompletableFuture<List<Bucket>> listBuckets(ListBucketsArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
-    return executeGetAsync(args, null, null)
+  public CompletableFuture<List<ListAllMyBucketsResult.Bucket>> listBuckets() {
+    return listBucketsAPI(ListBucketsArgs.builder().build())
         .thenApply(
             response -> {
-              try {
-                ListAllMyBucketsResult result =
-                    Xml.unmarshal(ListAllMyBucketsResult.class, response.body().charStream());
-                return result.buckets();
-              } catch (XmlParserException e) {
-                throw new CompletionException(e);
-              } finally {
-                response.close();
-              }
+              return response.result().buckets();
             });
+  }
+
+  /**
+   * Lists bucket information of all buckets.
+   *
+   * <pre>Example:{@code
+   * Iterable<Result<ListAllMyBucketsResult.Bucket>> results = minioAsyncClient.listBuckets(ListBucketsArgs.builder().build());
+   * for (Result<ListAllMyBucketsResult.Bucket> result : results) {
+   *   Bucket bucket = result.get();
+   *   System.out.println(String.format("Bucket: %s, Region: %s, CreationDate: %s", bucket.name(), bucket.bucketRegion(), bucket.creationDate()));
+   * }
+   * }</pre>
+   *
+   * @return {@link Iterable}&lt;{@link List}&lt;{@link ListAllMyBucketsResult.Bucket}&gt;&gt;
+   *     object.
+   */
+  public Iterable<Result<ListAllMyBucketsResult.Bucket>> listBuckets(ListBucketsArgs args) {
+    return new Iterable<Result<ListAllMyBucketsResult.Bucket>>() {
+      @Override
+      public Iterator<Result<ListAllMyBucketsResult.Bucket>> iterator() {
+        return new Iterator<Result<ListAllMyBucketsResult.Bucket>>() {
+          private ListAllMyBucketsResult result = null;
+          private Result<ListAllMyBucketsResult.Bucket> error = null;
+          private Iterator<ListAllMyBucketsResult.Bucket> iterator = null;
+          private boolean completed = false;
+
+          private synchronized void populate() {
+            if (completed) return;
+
+            try {
+              this.iterator = Collections.emptyIterator();
+              try {
+                ListBucketsResponse response =
+                    listBucketsAPI(
+                            ListBucketsArgs.builder()
+                                .extraHeaders(args.extraHeaders())
+                                .extraQueryParams(args.extraQueryParams())
+                                .bucketRegion(args.bucketRegion())
+                                .maxBuckets(args.maxBuckets())
+                                .prefix(args.prefix())
+                                .continuationToken(
+                                    result == null
+                                        ? args.continuationToken()
+                                        : result.continuationToken())
+                                .build())
+                        .join();
+                this.result = response.result();
+              } catch (CompletionException e) {
+                throwMinioException(e);
+              }
+              this.iterator = this.result.buckets().iterator();
+            } catch (MinioException e) {
+              this.error = new Result<>(e);
+              completed = true;
+            }
+          }
+
+          @Override
+          public boolean hasNext() {
+            if (this.completed) return false;
+
+            if (this.error == null && this.iterator == null) {
+              populate();
+            }
+
+            if (this.error == null
+                && !this.iterator.hasNext()
+                && this.result.continuationToken() != null
+                && !this.result.continuationToken().isEmpty()) {
+              populate();
+            }
+
+            if (this.error != null) return true;
+            if (this.iterator.hasNext()) return true;
+
+            this.completed = true;
+            return false;
+          }
+
+          @Override
+          public Result<ListAllMyBucketsResult.Bucket> next() {
+            if (this.completed) throw new NoSuchElementException();
+            if (this.error == null && this.iterator == null) {
+              populate();
+            }
+
+            if (this.error == null
+                && !this.iterator.hasNext()
+                && this.result.continuationToken() != null
+                && !this.result.continuationToken().isEmpty()) {
+              populate();
+            }
+
+            if (this.error != null) {
+              this.completed = true;
+              return this.error;
+            }
+
+            ListAllMyBucketsResult.Bucket item = null;
+            if (this.iterator.hasNext()) {
+              item = this.iterator.next();
+            }
+
+            if (item != null) {
+              return new Result<>(item);
+            }
+
+            this.completed = true;
+            throw new NoSuchElementException();
+          }
+
+          @Override
+          public void remove() {
+            throw new UnsupportedOperationException();
+          }
+        };
+      }
+    };
   }
 
   /**
@@ -1376,35 +1377,18 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link BucketExistsArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Boolean}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Boolean> bucketExists(BucketExistsArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Boolean> bucketExists(BucketExistsArgs args) {
     return executeHeadAsync(args, null, null)
         .exceptionally(
             e -> {
-              Throwable ex = e.getCause();
-
-              if (ex instanceof CompletionException) {
-                ex = ((CompletionException) ex).getCause();
-              }
-
-              if (ex instanceof ExecutionException) {
-                ex = ((ExecutionException) ex).getCause();
-              }
-
-              if (ex instanceof ErrorResponseException) {
-                if (((ErrorResponseException) ex).errorResponse().code().equals(NO_SUCH_BUCKET)) {
+              e = e.getCause();
+              if (e instanceof ErrorResponseException) {
+                if (((ErrorResponseException) e).errorResponse().code().equals(NO_SUCH_BUCKET)) {
                   return null;
                 }
               }
-              throw new CompletionException(ex);
+              throw new CompletionException(e);
             })
         .thenApply(
             response -> {
@@ -1443,52 +1427,11 @@ public class MinioAsyncClient extends S3Base {
    * }</pre>
    *
    * @param args Object with bucket name, region and lock functionality
-   * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @return {@link CompletableFuture}&lt;{@link GenericResponse}&gt; object.
    */
-  public CompletableFuture<Void> makeBucket(MakeBucketArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<GenericResponse> makeBucket(MakeBucketArgs args) {
     checkArgs(args);
-
-    String region = args.region();
-    if (this.region != null && !this.region.isEmpty()) {
-      // Error out if region does not match with region passed via constructor.
-      if (region != null && !region.equals(this.region)) {
-        throw new IllegalArgumentException(
-            "region must be " + this.region + ", but passed " + region);
-      }
-
-      region = this.region;
-    }
-
-    if (region == null) {
-      region = US_EAST_1;
-    }
-
-    Multimap<String, String> headers =
-        args.objectLock() ? newMultimap("x-amz-bucket-object-lock-enabled", "true") : null;
-    final String location = region;
-
-    return executeAsync(
-            Method.PUT,
-            args.bucket(),
-            null,
-            location,
-            httpHeaders(merge(args.extraHeaders(), headers)),
-            args.extraQueryParams(),
-            location.equals(US_EAST_1) ? null : new CreateBucketConfiguration(location),
-            0)
-        .thenAccept(
-            response -> {
-              regionCache.put(args.bucket(), location);
-              response.close();
-            });
+    return createBucket(new CreateBucketArgs(args));
   }
 
   /**
@@ -1501,18 +1444,16 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link SetBucketVersioningArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> setBucketVersioning(SetBucketVersioningArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> setBucketVersioning(SetBucketVersioningArgs args) {
     checkArgs(args);
-    return executePutAsync(args, null, newMultimap("versioning", ""), args.config(), 0)
+    Http.Body body = null;
+    try {
+      body = new Http.Body(args.config(), null, null, null);
+    } catch (MinioException e) {
+      return Utils.failedFuture(e);
+    }
+    return executePutAsync(args, null, new Http.QueryParameters("versioning", ""), body)
         .thenAccept(response -> response.close());
   }
 
@@ -1527,19 +1468,11 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link GetBucketVersioningArgs} object.
    * @return {@link CompletableFuture}&lt;{@link VersioningConfiguration}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
   public CompletableFuture<VersioningConfiguration> getBucketVersioning(
-      GetBucketVersioningArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+      GetBucketVersioningArgs args) {
     checkArgs(args);
-    return executeGetAsync(args, null, newMultimap("versioning", ""))
+    return executeGetAsync(args, null, new Http.QueryParameters("versioning", ""))
         .thenApply(
             response -> {
               try {
@@ -1564,18 +1497,16 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link SetObjectLockConfigurationArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> setObjectLockConfiguration(SetObjectLockConfigurationArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> setObjectLockConfiguration(SetObjectLockConfigurationArgs args) {
     checkArgs(args);
-    return executePutAsync(args, null, newMultimap("object-lock", ""), args.config(), 0)
+    Http.Body body = null;
+    try {
+      body = new Http.Body(args.config(), null, null, null);
+    } catch (MinioException e) {
+      return Utils.failedFuture(e);
+    }
+    return executePutAsync(args, null, new Http.QueryParameters("object-lock", ""), body)
         .thenAccept(response -> response.close());
   }
 
@@ -1589,20 +1520,17 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link DeleteObjectLockConfigurationArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
   public CompletableFuture<Void> deleteObjectLockConfiguration(
-      DeleteObjectLockConfigurationArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+      DeleteObjectLockConfigurationArgs args) {
     checkArgs(args);
-    return executePutAsync(
-            args, null, newMultimap("object-lock", ""), new ObjectLockConfiguration(), 0)
+    Http.Body body = null;
+    try {
+      body = new Http.Body(new ObjectLockConfiguration(), null, null, null);
+    } catch (MinioException e) {
+      return Utils.failedFuture(e);
+    }
+    return executePutAsync(args, null, new Http.QueryParameters("object-lock", ""), body)
         .thenAccept(response -> response.close());
   }
 
@@ -1617,19 +1545,11 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link GetObjectLockConfigurationArgs} object.
    * @return {@link CompletableFuture}&lt;{@link ObjectLockConfiguration}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
   public CompletableFuture<ObjectLockConfiguration> getObjectLockConfiguration(
-      GetObjectLockConfigurationArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+      GetObjectLockConfigurationArgs args) {
     checkArgs(args);
-    return executeGetAsync(args, null, newMultimap("object-lock", ""))
+    return executeGetAsync(args, null, new Http.QueryParameters("object-lock", ""))
         .thenApply(
             response -> {
               try {
@@ -1659,27 +1579,24 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link SetObjectRetentionArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> setObjectRetention(SetObjectRetentionArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> setObjectRetention(SetObjectRetentionArgs args) {
     checkArgs(args);
-    Multimap<String, String> queryParams = newMultimap("retention", "");
+    Http.QueryParameters queryParams = new Http.QueryParameters("retention", "");
     if (args.versionId() != null) queryParams.put("versionId", args.versionId());
+    Http.Body body = null;
+    try {
+      body = new Http.Body(args.config(), null, null, null);
+    } catch (MinioException e) {
+      return Utils.failedFuture(e);
+    }
     return executePutAsync(
             args,
             args.bypassGovernanceMode()
-                ? newMultimap("x-amz-bypass-governance-retention", "True")
+                ? new Http.Headers("x-amz-bypass-governance-retention", "True")
                 : null,
             queryParams,
-            args.config(),
-            0)
+            body)
         .thenAccept(response -> response.close());
   }
 
@@ -1697,41 +1614,24 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link GetObjectRetentionArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Retention}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Retention> getObjectRetention(GetObjectRetentionArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Retention> getObjectRetention(GetObjectRetentionArgs args) {
     checkArgs(args);
-    Multimap<String, String> queryParams = newMultimap("retention", "");
+    Http.QueryParameters queryParams = new Http.QueryParameters("retention", "");
     if (args.versionId() != null) queryParams.put("versionId", args.versionId());
     return executeGetAsync(args, null, queryParams)
         .exceptionally(
             e -> {
-              Throwable ex = e.getCause();
-
-              if (ex instanceof CompletionException) {
-                ex = ((CompletionException) ex).getCause();
-              }
-
-              if (ex instanceof ExecutionException) {
-                ex = ((ExecutionException) ex).getCause();
-              }
-
-              if (ex instanceof ErrorResponseException) {
-                if (((ErrorResponseException) ex)
+              e = e.getCause();
+              if (e instanceof ErrorResponseException) {
+                if (((ErrorResponseException) e)
                     .errorResponse()
                     .code()
                     .equals(NO_SUCH_OBJECT_LOCK_CONFIGURATION)) {
                   return null;
                 }
               }
-              throw new CompletionException(ex);
+              throw new CompletionException(e);
             })
         .thenApply(
             response -> {
@@ -1760,21 +1660,18 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link EnableObjectLegalHoldArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> enableObjectLegalHold(EnableObjectLegalHoldArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> enableObjectLegalHold(EnableObjectLegalHoldArgs args) {
     checkArgs(args);
-    Multimap<String, String> queryParams = newMultimap("legal-hold", "");
+    Http.QueryParameters queryParams = new Http.QueryParameters("legal-hold", "");
     if (args.versionId() != null) queryParams.put("versionId", args.versionId());
-    return executePutAsync(args, null, queryParams, new LegalHold(true), 0)
-        .thenAccept(response -> response.close());
+    Http.Body body = null;
+    try {
+      body = new Http.Body(new LegalHold(true), null, null, null);
+    } catch (MinioException e) {
+      return Utils.failedFuture(e);
+    }
+    return executePutAsync(args, null, queryParams, body).thenAccept(response -> response.close());
   }
 
   /**
@@ -1791,21 +1688,18 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link DisableObjectLegalHoldArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> disableObjectLegalHold(DisableObjectLegalHoldArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> disableObjectLegalHold(DisableObjectLegalHoldArgs args) {
     checkArgs(args);
-    Multimap<String, String> queryParams = newMultimap("legal-hold", "");
+    Http.QueryParameters queryParams = new Http.QueryParameters("legal-hold", "");
     if (args.versionId() != null) queryParams.put("versionId", args.versionId());
-    return executePutAsync(args, null, queryParams, new LegalHold(false), 0)
-        .thenAccept(response -> response.close());
+    Http.Body body = null;
+    try {
+      body = new Http.Body(new LegalHold(false), null, null, null);
+    } catch (MinioException e) {
+      return Utils.failedFuture(e);
+    }
+    return executePutAsync(args, null, queryParams, body).thenAccept(response -> response.close());
   }
 
   /**
@@ -1823,41 +1717,24 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link IsObjectLegalHoldEnabledArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Boolean}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Boolean> isObjectLegalHoldEnabled(IsObjectLegalHoldEnabledArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Boolean> isObjectLegalHoldEnabled(IsObjectLegalHoldEnabledArgs args) {
     checkArgs(args);
-    Multimap<String, String> queryParams = newMultimap("legal-hold", "");
+    Http.QueryParameters queryParams = new Http.QueryParameters("legal-hold", "");
     if (args.versionId() != null) queryParams.put("versionId", args.versionId());
     return executeGetAsync(args, null, queryParams)
         .exceptionally(
             e -> {
-              Throwable ex = e.getCause();
-
-              if (ex instanceof CompletionException) {
-                ex = ((CompletionException) ex).getCause();
-              }
-
-              if (ex instanceof ExecutionException) {
-                ex = ((ExecutionException) ex).getCause();
-              }
-
-              if (ex instanceof ErrorResponseException) {
-                if (((ErrorResponseException) ex)
+              e = e.getCause();
+              if (e instanceof ErrorResponseException) {
+                if (((ErrorResponseException) e)
                     .errorResponse()
                     .code()
                     .equals(NO_SUCH_OBJECT_LOCK_CONFIGURATION)) {
                   return null;
                 }
               }
-              throw new CompletionException(ex);
+              throw new CompletionException(e);
             })
         .thenApply(
             response -> {
@@ -1883,19 +1760,317 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link RemoveBucketArgs} bucket.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> removeBucket(RemoveBucketArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> removeBucket(RemoveBucketArgs args) {
     checkArgs(args);
     return executeDeleteAsync(args, null, null)
         .thenAccept(response -> regionCache.remove(args.bucket()));
+  }
+
+  private CompletableFuture<List<UploadPartResponse>> uploadPartsSequentially(
+      PutObjectBaseArgs args,
+      String uploadId,
+      PartReader partReader,
+      boolean addContentSha256,
+      boolean addSha256Checksum,
+      ByteBuffer buffer,
+      long partSize,
+      List<UploadPartResponse> responses) {
+    return supplyAsync(
+            () ->
+                new UploadPartArgs(
+                    args,
+                    uploadId,
+                    partReader.partNumber(),
+                    buffer,
+                    Checksum.makeHeaders(
+                        partReader.hashers(), addContentSha256, addSha256Checksum)))
+        .thenCompose(partArgs -> uploadPart(partArgs))
+        .thenCompose(
+            response -> {
+              responses.add(response);
+              try {
+                buffer.reset();
+                if (partReader.partNumber() == partReader.partCount()) {
+                  return CompletableFuture.completedFuture(responses);
+                }
+                partReader.read(buffer);
+              } catch (MinioException e) {
+                return Utils.failedFuture(e);
+              }
+              return uploadPartsSequentially(
+                  args,
+                  uploadId,
+                  partReader,
+                  addContentSha256,
+                  addSha256Checksum,
+                  buffer,
+                  partSize,
+                  responses);
+            });
+  }
+
+  private CompletableFuture<List<UploadPartResponse>> uploadPartsParallelly(
+      PutObjectBaseArgs args,
+      String uploadId,
+      PartReader partReader,
+      boolean addContentSha256,
+      boolean addSha256Checksum,
+      ByteBuffer buffer,
+      long partSize,
+      int parallelUploads) {
+    ByteBufferPool bufferPool = new ByteBufferPool(parallelUploads, partSize);
+    ExecutorService uploadExecutor = Executors.newFixedThreadPool(parallelUploads);
+    BlockingQueue<UploadPartArgs.Wrapper> queue = new ArrayBlockingQueue<>(parallelUploads);
+    CountDownLatch doneLatch = new CountDownLatch(parallelUploads);
+    List<UploadPartResponse> uploadResults = Collections.synchronizedList(new ArrayList<>());
+    AtomicBoolean errorOccurred = new AtomicBoolean(false);
+    ConcurrentLinkedQueue<Throwable> exceptions = new ConcurrentLinkedQueue<>();
+
+    return supplyAsync(
+        () -> {
+          try {
+            // Start uploader workers
+            for (int i = 0; i < parallelUploads; i++) {
+              Future<?> result =
+                  uploadExecutor.submit(
+                      () -> {
+                        try {
+                          while (!errorOccurred.get()) {
+                            UploadPartArgs.Wrapper part = queue.take();
+                            if (part.args() == null) break; // poison pill
+                            UploadPartResponse response = uploadPart(part.args()).join();
+                            bufferPool.put(part.args().buffer());
+                            uploadResults.add(response);
+                          }
+                        } catch (InterruptedException e) {
+                          errorOccurred.set(true); // signal to all threads
+                          exceptions.add(e);
+                        } finally {
+                          doneLatch.countDown();
+                        }
+                      });
+              if (result == null) {
+                throw new RuntimeException(
+                    "uploadExecutor.submit() returns null; this should not happen");
+              }
+            }
+
+            // Reader: submit initial buffer
+            queue.put(
+                new UploadPartArgs.Wrapper(
+                    new UploadPartArgs(
+                        args,
+                        uploadId,
+                        partReader.partNumber(),
+                        buffer,
+                        Checksum.makeHeaders(
+                            partReader.hashers(), addContentSha256, addSha256Checksum))));
+
+            // Reader: loop to submit remaining parts
+            while (partReader.partNumber() != partReader.partCount() && !errorOccurred.get()) {
+              ByteBuffer buf = bufferPool.take();
+              partReader.read(buf);
+              queue.put(
+                  new UploadPartArgs.Wrapper(
+                      new UploadPartArgs(
+                          args,
+                          uploadId,
+                          partReader.partNumber(),
+                          buf,
+                          Checksum.makeHeaders(
+                              partReader.hashers(), addContentSha256, addSha256Checksum))));
+            }
+
+            // Signal all workers to stop with poison pills
+            for (int i = 0; i < parallelUploads; i++) {
+              queue.put(new UploadPartArgs.Wrapper(null));
+            }
+
+            doneLatch.await();
+            uploadExecutor.shutdown();
+
+            if (!exceptions.isEmpty()) {
+              CompletionException combined =
+                  new CompletionException("uploadPartsParallelly failed", exceptions.peek());
+              exceptions.stream().skip(1).forEach(combined::addSuppressed);
+              throw combined;
+            }
+
+            uploadResults.sort(Comparator.comparingInt(r -> r.part().partNumber()));
+            return uploadResults;
+
+          } catch (InterruptedException | MinioException e) {
+            throw new CompletionException(e);
+          } finally {
+            uploadExecutor.shutdownNow(); // ensure executor exits on error
+          }
+        });
+  }
+
+  private CompletableFuture<ObjectWriteResponse> putObject(
+      PutObjectBaseArgs args,
+      Object fileStreamData,
+      MediaType contentType,
+      boolean addContentSha256) {
+    RandomAccessFile file = null;
+    InputStream stream = null;
+    byte[] data = null;
+    if (fileStreamData instanceof RandomAccessFile) file = (RandomAccessFile) fileStreamData;
+    if (fileStreamData instanceof InputStream) stream = (InputStream) fileStreamData;
+    if (fileStreamData instanceof byte[]) data = (byte[]) fileStreamData;
+
+    Checksum.Algorithm algorithm =
+        args.checksum() != null ? args.checksum() : Checksum.Algorithm.CRC32C;
+    boolean addSha256Checksum = algorithm == Checksum.Algorithm.SHA256;
+    Checksum.Algorithm[] algorithms;
+    if (addContentSha256 && !addSha256Checksum) {
+      algorithms = new Checksum.Algorithm[] {algorithm, Checksum.Algorithm.SHA256};
+    } else {
+      algorithms = new Checksum.Algorithm[] {algorithm};
+    }
+
+    PartReader partReader = null;
+    ByteBuffer buffer = null;
+    int partCount = args.partCount();
+
+    if (stream != null) {
+      try {
+        partReader =
+            new PartReader(
+                stream, args.objectSize(), args.partSize(), args.partCount(), algorithms);
+        buffer = new ByteBuffer(partReader.partCount() == 1 ? args.objectSize() : args.partSize());
+        partReader.read(buffer);
+        partCount = partReader.partCount();
+      } catch (MinioException e) {
+        return Utils.failedFuture(e);
+      }
+    }
+
+    if (partCount == 1) {
+      if (stream != null) {
+        return putObject(
+            new PutObjectAPIArgs(
+                args,
+                buffer,
+                contentType,
+                Checksum.makeHeaders(partReader.hashers(), addContentSha256, addSha256Checksum)));
+      }
+
+      if (args.objectSize() == null) {
+        return Utils.failedFuture(
+            new MinioException("object size is null; this should not happen"));
+      }
+      long length = args.objectSize();
+
+      try {
+        Map<Checksum.Algorithm, Checksum.Hasher> hashers = Checksum.newHasherMap(algorithms);
+
+        if (file != null) {
+          long position = file.getFilePointer();
+          Checksum.update(hashers, file, length);
+          file.seek(position);
+          return putObject(
+              new PutObjectAPIArgs(
+                  args,
+                  file,
+                  length,
+                  contentType,
+                  Checksum.makeHeaders(hashers, addContentSha256, addSha256Checksum)));
+        }
+
+        Checksum.update(hashers, data, (int) length);
+        return putObject(
+            new PutObjectAPIArgs(
+                args,
+                data,
+                (int) length,
+                contentType,
+                Checksum.makeHeaders(hashers, addContentSha256, addSha256Checksum)));
+      } catch (MinioException e) {
+        return Utils.failedFuture(e);
+      } catch (IOException e) {
+        return Utils.failedFuture(new MinioException(e));
+      }
+    }
+
+    // Multipart upload starts here
+
+    if (args.checksum() != null && !args.checksum().compositeSupport()) {
+      throw new IllegalArgumentException(
+          "unsupported checksum " + args.checksum() + " for multipart upload");
+    }
+
+    if (file != null) {
+      try {
+        partReader =
+            new PartReader(file, args.objectSize(), args.partSize(), args.partCount(), algorithms);
+        buffer = new ByteBuffer(args.partSize());
+        partReader.read(buffer);
+      } catch (MinioException e) {
+        return Utils.failedFuture(e);
+      }
+    }
+
+    int parallelUploads = args.parallelUploads();
+    if (parallelUploads <= 0) parallelUploads = 1;
+    if (partReader.partCount() > 0 && parallelUploads > partReader.partCount()) {
+      parallelUploads = partReader.partCount();
+    }
+
+    String[] uploadId = {null};
+    final PartReader finalPartReader = partReader;
+    final ByteBuffer finalBuffer = buffer;
+    final int finalParallelUploads = parallelUploads;
+    return createMultipartUpload(new CreateMultipartUploadArgs(args, contentType, algorithm))
+        .thenCompose(
+            response -> {
+              uploadId[0] = response.result().uploadId();
+              // Do sequential multipart uploads
+              if (finalParallelUploads == 1) {
+                return uploadPartsSequentially(
+                    args,
+                    uploadId[0],
+                    finalPartReader,
+                    addContentSha256,
+                    addSha256Checksum,
+                    finalBuffer,
+                    args.partSize(),
+                    new ArrayList<UploadPartResponse>());
+              }
+
+              // Do sequential multipart uploads
+              return uploadPartsParallelly(
+                  args,
+                  uploadId[0],
+                  finalPartReader,
+                  addContentSha256,
+                  addSha256Checksum,
+                  finalBuffer,
+                  args.partSize(),
+                  finalParallelUploads);
+            })
+        .thenCompose(
+            responses ->
+                completeMultipartUpload(
+                    new CompleteMultipartUploadArgs(
+                        args,
+                        uploadId[0],
+                        responses.stream()
+                            .map(UploadPartResponse::part)
+                            .toArray(io.minio.messages.Part[]::new))))
+        .exceptionally(
+            e -> {
+              e = e.getCause();
+              if (uploadId[0] != null) {
+                try {
+                  abortMultipartUpload(new AbortMultipartUploadArgs(args, uploadId[0])).join();
+                } catch (CompletionException ex) {
+                  e.addSuppressed(ex.getCause());
+                }
+              }
+              throw new CompletionException(e);
+            });
   }
 
   /**
@@ -1944,25 +2119,19 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link PutObjectArgs} object.
    * @return {@link CompletableFuture}&lt;{@link ObjectWriteResponse}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<ObjectWriteResponse> putObject(PutObjectArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<ObjectWriteResponse> putObject(PutObjectArgs args) {
     checkArgs(args);
-    args.validateSse(this.baseUrl);
-    return putObjectAsync(
-        args,
-        args.stream(),
-        args.objectSize(),
-        args.partSize(),
-        args.partCount(),
-        args.contentType());
+    args.validateSse(this.baseUrl.isHttps());
+    try {
+      return putObject(
+          args,
+          args.stream() != null ? args.stream() : args.data(),
+          args.contentType(),
+          !this.baseUrl.isHttps());
+    } catch (IOException e) {
+      return Utils.failedFuture(new MinioException(e));
+    }
   }
 
   /**
@@ -1986,50 +2155,35 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link UploadObjectArgs} object.
    * @return {@link CompletableFuture}&lt;{@link ObjectWriteResponse}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<ObjectWriteResponse> uploadObject(UploadObjectArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<ObjectWriteResponse> uploadObject(UploadObjectArgs args) {
     checkArgs(args);
-    args.validateSse(this.baseUrl);
-    final RandomAccessFile file = new RandomAccessFile(args.filename(), "r");
-    return putObjectAsync(
-            args, file, args.objectSize(), args.partSize(), args.partCount(), args.contentType())
-        .exceptionally(
-            e -> {
-              try {
-                file.close();
-              } catch (IOException ex) {
-                throw new CompletionException(ex);
-              }
-
-              Throwable ex = e.getCause();
-
-              if (ex instanceof CompletionException) {
-                ex = ((CompletionException) ex).getCause();
-              }
-
-              if (ex instanceof ExecutionException) {
-                ex = ((ExecutionException) ex).getCause();
-              }
-
-              throw new CompletionException(ex);
-            })
-        .thenApply(
-            objectWriteResponse -> {
-              try {
-                file.close();
-              } catch (IOException e) {
+    args.validateSse(this.baseUrl.isHttps());
+    try {
+      final RandomAccessFile file = new RandomAccessFile(args.filename(), "r");
+      return putObject(args, file, args.contentType(), !this.baseUrl.isHttps())
+          .exceptionally(
+              e -> {
+                e = e.getCause();
+                try {
+                  file.close();
+                } catch (IOException ex) {
+                  e.addSuppressed(new MinioException(ex));
+                }
                 throw new CompletionException(e);
-              }
-              return objectWriteResponse;
-            });
+              })
+          .thenApply(
+              objectWriteResponse -> {
+                try {
+                  file.close();
+                } catch (IOException e) {
+                  throw new CompletionException(new MinioException(e));
+                }
+                return objectWriteResponse;
+              });
+    } catch (IOException e) {
+      return Utils.failedFuture(new MinioException(e));
+    }
   }
 
   /**
@@ -2043,39 +2197,22 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link GetBucketPolicyArgs} object.
    * @return {@link CompletableFuture}&lt;{@link String}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<String> getBucketPolicy(GetBucketPolicyArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<String> getBucketPolicy(GetBucketPolicyArgs args) {
     checkArgs(args);
-    return executeGetAsync(args, null, newMultimap("policy", ""))
+    return executeGetAsync(args, null, new Http.QueryParameters("policy", ""))
         .exceptionally(
             e -> {
-              Throwable ex = e.getCause();
-
-              if (ex instanceof CompletionException) {
-                ex = ((CompletionException) ex).getCause();
-              }
-
-              if (ex instanceof ExecutionException) {
-                ex = ((ExecutionException) ex).getCause();
-              }
-
-              if (ex instanceof ErrorResponseException) {
-                if (((ErrorResponseException) ex)
+              e = e.getCause();
+              if (e instanceof ErrorResponseException) {
+                if (((ErrorResponseException) e)
                     .errorResponse()
                     .code()
                     .equals(NO_SUCH_BUCKET_POLICY)) {
                   return null;
                 }
               }
-              throw new CompletionException(ex);
+              throw new CompletionException(e);
             })
         .thenApply(
             response -> {
@@ -2108,7 +2245,7 @@ public class MinioAsyncClient extends S3Base {
 
                 return new String(buf, 0, bytesRead, StandardCharsets.UTF_8);
               } catch (IOException e) {
-                throw new CompletionException(e);
+                throw new CompletionException(new MinioException(e));
               } finally {
                 response.close();
               }
@@ -2147,23 +2284,16 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link SetBucketPolicyArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> setBucketPolicy(SetBucketPolicyArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> setBucketPolicy(SetBucketPolicyArgs args) {
     checkArgs(args);
-    return executePutAsync(
-            args,
-            newMultimap("Content-Type", "application/json"),
-            newMultimap("policy", ""),
-            args.config(),
-            0)
+    Http.Body body = null;
+    try {
+      body = new Http.Body(args.config(), Http.JSON_MEDIA_TYPE, null, null);
+    } catch (MinioException e) {
+      return Utils.failedFuture(e);
+    }
+    return executePutAsync(args, null, new Http.QueryParameters("policy", ""), body)
         .thenAccept(response -> response.close());
   }
 
@@ -2178,39 +2308,22 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link DeleteBucketPolicyArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> deleteBucketPolicy(DeleteBucketPolicyArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> deleteBucketPolicy(DeleteBucketPolicyArgs args) {
     checkArgs(args);
-    return executeDeleteAsync(args, null, newMultimap("policy", ""))
+    return executeDeleteAsync(args, null, new Http.QueryParameters("policy", ""))
         .exceptionally(
             e -> {
-              Throwable ex = e.getCause();
-
-              if (ex instanceof CompletionException) {
-                ex = ((CompletionException) ex).getCause();
-              }
-
-              if (ex instanceof ExecutionException) {
-                ex = ((ExecutionException) ex).getCause();
-              }
-
-              if (ex instanceof ErrorResponseException) {
-                if (((ErrorResponseException) ex)
+              e = e.getCause();
+              if (e instanceof ErrorResponseException) {
+                if (((ErrorResponseException) e)
                     .errorResponse()
                     .code()
                     .equals(NO_SUCH_BUCKET_POLICY)) {
                   return null;
                 }
               }
-              throw new CompletionException(ex);
+              throw new CompletionException(e);
             })
         .thenAccept(
             response -> {
@@ -2222,7 +2335,7 @@ public class MinioAsyncClient extends S3Base {
    * Sets lifecycle configuration to a bucket.
    *
    * <pre>Example:{@code
-   * List<LifecycleRule> rules = new LinkedList<>();
+   * List<LifecycleRule> rules = new ArrayList<>();
    * rules.add(
    *     new LifecycleRule(
    *         Status.ENABLED,
@@ -2240,18 +2353,16 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link SetBucketLifecycleArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> setBucketLifecycle(SetBucketLifecycleArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> setBucketLifecycle(SetBucketLifecycleArgs args) {
     checkArgs(args);
-    return executePutAsync(args, null, newMultimap("lifecycle", ""), args.config(), 0)
+    Http.Body body = null;
+    try {
+      body = new Http.Body(args.config(), null, null, null);
+    } catch (MinioException e) {
+      return Utils.failedFuture(e);
+    }
+    return executePutAsync(args, null, new Http.QueryParameters("lifecycle", ""), body)
         .thenAccept(response -> response.close());
   }
 
@@ -2265,18 +2376,10 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link DeleteBucketLifecycleArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> deleteBucketLifecycle(DeleteBucketLifecycleArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> deleteBucketLifecycle(DeleteBucketLifecycleArgs args) {
     checkArgs(args);
-    return executeDeleteAsync(args, null, newMultimap("lifecycle", ""))
+    return executeDeleteAsync(args, null, new Http.QueryParameters("lifecycle", ""))
         .thenAccept(response -> response.close());
   }
 
@@ -2292,39 +2395,22 @@ public class MinioAsyncClient extends S3Base {
    * @param args {@link GetBucketLifecycleArgs} object.
    * @return {@link LifecycleConfiguration} object.
    * @return {@link CompletableFuture}&lt;{@link LifecycleConfiguration}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<LifecycleConfiguration> getBucketLifecycle(GetBucketLifecycleArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<LifecycleConfiguration> getBucketLifecycle(GetBucketLifecycleArgs args) {
     checkArgs(args);
-    return executeGetAsync(args, null, newMultimap("lifecycle", ""))
+    return executeGetAsync(args, null, new Http.QueryParameters("lifecycle", ""))
         .exceptionally(
             e -> {
-              Throwable ex = e.getCause();
-
-              if (ex instanceof CompletionException) {
-                ex = ((CompletionException) ex).getCause();
-              }
-
-              if (ex instanceof ExecutionException) {
-                ex = ((ExecutionException) ex).getCause();
-              }
-
-              if (ex instanceof ErrorResponseException) {
-                if (((ErrorResponseException) ex)
+              e = e.getCause();
+              if (e instanceof ErrorResponseException) {
+                if (((ErrorResponseException) e)
                     .errorResponse()
                     .code()
                     .equals("NoSuchLifecycleConfiguration")) {
                   return null;
                 }
               }
-              throw new CompletionException(ex);
+              throw new CompletionException(e);
             })
         .thenApply(
             response -> {
@@ -2350,19 +2436,11 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link GetBucketNotificationArgs} object.
    * @return {@link CompletableFuture}&lt;{@link NotificationConfiguration}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
   public CompletableFuture<NotificationConfiguration> getBucketNotification(
-      GetBucketNotificationArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+      GetBucketNotificationArgs args) {
     checkArgs(args);
-    return executeGetAsync(args, null, newMultimap("notification", ""))
+    return executeGetAsync(args, null, new Http.QueryParameters("notification", ""))
         .thenApply(
             response -> {
               try {
@@ -2379,7 +2457,7 @@ public class MinioAsyncClient extends S3Base {
    * Sets notification configuration to a bucket.
    *
    * <pre>Example:{@code
-   * List<EventType> eventList = new LinkedList<>();
+   * List<EventType> eventList = new ArrayList<>();
    * eventList.add(EventType.OBJECT_CREATED_PUT);
    * eventList.add(EventType.OBJECT_CREATED_COPY);
    *
@@ -2389,7 +2467,7 @@ public class MinioAsyncClient extends S3Base {
    * queueConfiguration.setPrefixRule("images");
    * queueConfiguration.setSuffixRule("pg");
    *
-   * List<QueueConfiguration> queueConfigurationList = new LinkedList<>();
+   * List<QueueConfiguration> queueConfigurationList = new ArrayList<>();
    * queueConfigurationList.add(queueConfiguration);
    *
    * NotificationConfiguration config = new NotificationConfiguration();
@@ -2401,18 +2479,16 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link SetBucketNotificationArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> setBucketNotification(SetBucketNotificationArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> setBucketNotification(SetBucketNotificationArgs args) {
     checkArgs(args);
-    return executePutAsync(args, null, newMultimap("notification", ""), args.config(), 0)
+    Http.Body body = null;
+    try {
+      body = new Http.Body(args.config(), null, null, null);
+    } catch (MinioException e) {
+      return Utils.failedFuture(e);
+    }
+    return executePutAsync(args, null, new Http.QueryParameters("notification", ""), body)
         .thenAccept(response -> response.close());
   }
 
@@ -2426,19 +2502,16 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link DeleteBucketNotificationArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> deleteBucketNotification(DeleteBucketNotificationArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> deleteBucketNotification(DeleteBucketNotificationArgs args) {
     checkArgs(args);
-    return executePutAsync(
-            args, null, newMultimap("notification", ""), new NotificationConfiguration(), 0)
+    Http.Body body = null;
+    try {
+      body = new Http.Body(new NotificationConfiguration(null, null, null, null), null, null, null);
+    } catch (MinioException e) {
+      return Utils.failedFuture(e);
+    }
+    return executePutAsync(args, null, new Http.QueryParameters("notification", ""), body)
         .thenAccept(response -> response.close());
   }
 
@@ -2453,40 +2526,23 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link GetBucketReplicationArgs} object.
    * @return {@link CompletableFuture}&lt;{@link ReplicationConfiguration}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
   public CompletableFuture<ReplicationConfiguration> getBucketReplication(
-      GetBucketReplicationArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+      GetBucketReplicationArgs args) {
     checkArgs(args);
-    return executeGetAsync(args, null, newMultimap("replication", ""))
+    return executeGetAsync(args, null, new Http.QueryParameters("replication", ""))
         .exceptionally(
             e -> {
-              Throwable ex = e.getCause();
-
-              if (ex instanceof CompletionException) {
-                ex = ((CompletionException) ex).getCause();
-              }
-
-              if (ex instanceof ExecutionException) {
-                ex = ((ExecutionException) ex).getCause();
-              }
-
-              if (ex instanceof ErrorResponseException) {
-                if (((ErrorResponseException) ex)
+              e = e.getCause();
+              if (e instanceof ErrorResponseException) {
+                if (((ErrorResponseException) e)
                     .errorResponse()
                     .code()
                     .equals("ReplicationConfigurationNotFoundError")) {
                   return null;
                 }
               }
-              throw new CompletionException(ex);
+              throw new CompletionException(e);
             })
         .thenApply(
             response -> {
@@ -2522,7 +2578,7 @@ public class MinioAsyncClient extends S3Base {
    *         null,
    *         Status.ENABLED);
    *
-   * List<ReplicationRule> rules = new LinkedList<>();
+   * List<ReplicationRule> rules = new ArrayList<>();
    * rules.add(rule);
    *
    * ReplicationConfiguration config =
@@ -2534,25 +2590,22 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link SetBucketReplicationArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> setBucketReplication(SetBucketReplicationArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> setBucketReplication(SetBucketReplicationArgs args) {
     checkArgs(args);
+    Http.Body body = null;
+    try {
+      body = new Http.Body(args.config(), null, null, null);
+    } catch (MinioException e) {
+      return Utils.failedFuture(e);
+    }
     return executePutAsync(
             args,
             (args.objectLockToken() != null)
-                ? newMultimap("x-amz-bucket-object-lock-token", args.objectLockToken())
+                ? new Http.Headers("x-amz-bucket-object-lock-token", args.objectLockToken())
                 : null,
-            newMultimap("replication", ""),
-            args.config(),
-            0)
+            new Http.QueryParameters("replication", ""),
+            body)
         .thenAccept(response -> response.close());
   }
 
@@ -2566,18 +2619,10 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link DeleteBucketReplicationArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> deleteBucketReplication(DeleteBucketReplicationArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> deleteBucketReplication(DeleteBucketReplicationArgs args) {
     checkArgs(args);
-    return executeDeleteAsync(args, null, newMultimap("replication", ""))
+    return executeDeleteAsync(args, null, new Http.QueryParameters("replication", ""))
         .thenAccept(response -> response.close());
   }
 
@@ -2610,36 +2655,23 @@ public class MinioAsyncClient extends S3Base {
    * @param args {@link ListenBucketNotificationArgs} object.
    * @return {@code CloseableIterator<Result<NotificationRecords>>} - Lazy closable iterator
    *     contains event records.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
   public CloseableIterator<Result<NotificationRecords>> listenBucketNotification(
-      ListenBucketNotificationArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+      ListenBucketNotificationArgs args) throws MinioException {
     checkArgs(args);
 
-    Multimap<String, String> queryParams =
-        newMultimap("prefix", args.prefix(), "suffix", args.suffix());
+    Http.QueryParameters queryParams =
+        new Http.QueryParameters("prefix", args.prefix(), "suffix", args.suffix());
     for (String event : args.events()) {
       queryParams.put("events", event);
     }
 
     Response response = null;
     try {
-      response = executeGetAsync(args, null, queryParams).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      throwEncapsulatedException(e);
+      response = executeGetAsync(args, null, queryParams).join();
+    } catch (CompletionException e) {
+      throwMinioException(e);
     }
     NotificationResultRecords result = new NotificationResultRecords(response);
     return result.closeableIterator();
@@ -2680,41 +2712,33 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args instance of {@link SelectObjectContentArgs}
    * @return {@link SelectResponseStream} - Contains filtered records and progress.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
   public SelectResponseStream selectObjectContent(SelectObjectContentArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+      throws MinioException {
     checkArgs(args);
-    args.validateSsec(this.baseUrl);
+    args.validateSsec(this.baseUrl.isHttps());
     Response response = null;
     try {
       response =
           executePostAsync(
                   args,
-                  (args.ssec() != null) ? newMultimap(args.ssec().headers()) : null,
-                  newMultimap("select", "", "select-type", "2"),
-                  new SelectObjectContentRequest(
-                      args.sqlExpression(),
-                      args.requestProgress(),
-                      args.inputSerialization(),
-                      args.outputSerialization(),
-                      args.scanStartRange(),
-                      args.scanEndRange()))
-              .get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      throwEncapsulatedException(e);
+                  args.ssec() == null ? null : args.ssec().headers(),
+                  new Http.QueryParameters("select", "", "select-type", "2"),
+                  new Http.Body(
+                      new SelectObjectContentRequest(
+                          args.sqlExpression(),
+                          args.requestProgress(),
+                          args.inputSerialization(),
+                          args.outputSerialization(),
+                          args.scanStartRange(),
+                          args.scanEndRange()),
+                      null,
+                      null,
+                      null))
+              .join();
+    } catch (CompletionException e) {
+      throwMinioException(e);
     }
     return new SelectResponseStream(response.body().byteStream());
   }
@@ -2729,18 +2753,16 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link SetBucketEncryptionArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> setBucketEncryption(SetBucketEncryptionArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> setBucketEncryption(SetBucketEncryptionArgs args) {
     checkArgs(args);
-    return executePutAsync(args, null, newMultimap("encryption", ""), args.config(), 0)
+    Http.Body body = null;
+    try {
+      body = new Http.Body(args.config(), null, null, null);
+    } catch (MinioException e) {
+      return Utils.failedFuture(e);
+    }
+    return executePutAsync(args, null, new Http.QueryParameters("encryption", ""), body)
         .thenAccept(response -> response.close());
   }
 
@@ -2755,39 +2777,22 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link GetBucketEncryptionArgs} object.
    * @return {@link CompletableFuture}&lt;{@link SseConfiguration}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<SseConfiguration> getBucketEncryption(GetBucketEncryptionArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<SseConfiguration> getBucketEncryption(GetBucketEncryptionArgs args) {
     checkArgs(args);
-    return executeGetAsync(args, null, newMultimap("encryption", ""))
+    return executeGetAsync(args, null, new Http.QueryParameters("encryption", ""))
         .exceptionally(
             e -> {
-              Throwable ex = e.getCause();
-
-              if (ex instanceof CompletionException) {
-                ex = ((CompletionException) ex).getCause();
-              }
-
-              if (ex instanceof ExecutionException) {
-                ex = ((ExecutionException) ex).getCause();
-              }
-
-              if (ex instanceof ErrorResponseException) {
-                if (((ErrorResponseException) ex)
+              e = e.getCause();
+              if (e instanceof ErrorResponseException) {
+                if (((ErrorResponseException) e)
                     .errorResponse()
                     .code()
                     .equals(SERVER_SIDE_ENCRYPTION_CONFIGURATION_NOT_FOUND_ERROR)) {
                   return null;
                 }
               }
-              throw new CompletionException(ex);
+              throw new CompletionException(e);
             })
         .thenApply(
             response -> {
@@ -2812,39 +2817,22 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link DeleteBucketEncryptionArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> deleteBucketEncryption(DeleteBucketEncryptionArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> deleteBucketEncryption(DeleteBucketEncryptionArgs args) {
     checkArgs(args);
-    return executeDeleteAsync(args, null, newMultimap("encryption", ""))
+    return executeDeleteAsync(args, null, new Http.QueryParameters("encryption", ""))
         .exceptionally(
             e -> {
-              Throwable ex = e.getCause();
-
-              if (ex instanceof CompletionException) {
-                ex = ((CompletionException) ex).getCause();
-              }
-
-              if (ex instanceof ExecutionException) {
-                ex = ((ExecutionException) ex).getCause();
-              }
-
-              if (ex instanceof ErrorResponseException) {
-                if (((ErrorResponseException) ex)
+              e = e.getCause();
+              if (e instanceof ErrorResponseException) {
+                if (((ErrorResponseException) e)
                     .errorResponse()
                     .code()
                     .equals(SERVER_SIDE_ENCRYPTION_CONFIGURATION_NOT_FOUND_ERROR)) {
                   return null;
                 }
               }
-              throw new CompletionException(ex);
+              throw new CompletionException(e);
             })
         .thenAccept(
             response -> {
@@ -2862,36 +2850,19 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link GetBucketTagsArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Tags}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Tags> getBucketTags(GetBucketTagsArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Tags> getBucketTags(GetBucketTagsArgs args) {
     checkArgs(args);
-    return executeGetAsync(args, null, newMultimap("tagging", ""))
+    return executeGetAsync(args, null, new Http.QueryParameters("tagging", ""))
         .exceptionally(
             e -> {
-              Throwable ex = e.getCause();
-
-              if (ex instanceof CompletionException) {
-                ex = ((CompletionException) ex).getCause();
-              }
-
-              if (ex instanceof ExecutionException) {
-                ex = ((ExecutionException) ex).getCause();
-              }
-
-              if (ex instanceof ErrorResponseException) {
-                if (((ErrorResponseException) ex).errorResponse().code().equals("NoSuchTagSet")) {
+              e = e.getCause();
+              if (e instanceof ErrorResponseException) {
+                if (((ErrorResponseException) e).errorResponse().code().equals("NoSuchTagSet")) {
                   return null;
                 }
               }
-              throw new CompletionException(ex);
+              throw new CompletionException(e);
             })
         .thenApply(
             response -> {
@@ -2919,18 +2890,16 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link SetBucketTagsArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> setBucketTags(SetBucketTagsArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> setBucketTags(SetBucketTagsArgs args) {
     checkArgs(args);
-    return executePutAsync(args, null, newMultimap("tagging", ""), args.tags(), 0)
+    Http.Body body = null;
+    try {
+      body = new Http.Body(args.tags(), null, null, null);
+    } catch (MinioException e) {
+      return Utils.failedFuture(e);
+    }
+    return executePutAsync(args, null, new Http.QueryParameters("tagging", ""), body)
         .thenAccept(response -> response.close());
   }
 
@@ -2944,18 +2913,10 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link DeleteBucketTagsArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> deleteBucketTags(DeleteBucketTagsArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> deleteBucketTags(DeleteBucketTagsArgs args) {
     checkArgs(args);
-    return executeDeleteAsync(args, null, newMultimap("tagging", ""))
+    return executeDeleteAsync(args, null, new Http.QueryParameters("tagging", ""))
         .thenAccept(response -> response.close());
   }
 
@@ -2970,18 +2931,10 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link GetObjectTagsArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Tags}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Tags> getObjectTags(GetObjectTagsArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Tags> getObjectTags(GetObjectTagsArgs args) {
     checkArgs(args);
-    Multimap<String, String> queryParams = newMultimap("tagging", "");
+    Http.QueryParameters queryParams = new Http.QueryParameters("tagging", "");
     if (args.versionId() != null) queryParams.put("versionId", args.versionId());
     return executeGetAsync(args, null, queryParams)
         .thenApply(
@@ -3013,21 +2966,18 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link SetObjectTagsArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> setObjectTags(SetObjectTagsArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> setObjectTags(SetObjectTagsArgs args) {
     checkArgs(args);
-    Multimap<String, String> queryParams = newMultimap("tagging", "");
+    Http.Body body = null;
+    try {
+      body = new Http.Body(args.tags(), null, null, null);
+    } catch (MinioException e) {
+      return Utils.failedFuture(e);
+    }
+    Http.QueryParameters queryParams = new Http.QueryParameters("tagging", "");
     if (args.versionId() != null) queryParams.put("versionId", args.versionId());
-    return executePutAsync(args, null, queryParams, args.tags(), 0)
-        .thenAccept(response -> response.close());
+    return executePutAsync(args, null, queryParams, body).thenAccept(response -> response.close());
   }
 
   /**
@@ -3040,20 +2990,204 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link DeleteObjectTagsArgs} object.
    * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  public CompletableFuture<Void> deleteObjectTags(DeleteObjectTagsArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+  public CompletableFuture<Void> deleteObjectTags(DeleteObjectTagsArgs args) {
     checkArgs(args);
-    Multimap<String, String> queryParams = newMultimap("tagging", "");
+    Http.QueryParameters queryParams = new Http.QueryParameters("tagging", "");
     if (args.versionId() != null) queryParams.put("versionId", args.versionId());
     return executeDeleteAsync(args, null, queryParams).thenAccept(response -> response.close());
+  }
+
+  /**
+   * Gets CORS configuration of a bucket.
+   *
+   * <pre>Example:{@code
+   * CompletableFuture<CORSConfiguration> future =
+   *     minioAsyncClient.getBucketCors(GetBucketCorsArgs.builder().bucket("my-bucketname").build());
+   * }</pre>
+   *
+   * @param args {@link GetBucketCorsArgs} object.
+   * @return {@link CompletableFuture}&lt;{@link CORSConfiguration}&gt; object.
+   */
+  public CompletableFuture<CORSConfiguration> getBucketCors(GetBucketCorsArgs args) {
+    checkArgs(args);
+    return executeGetAsync(args, null, new Http.QueryParameters("cors", ""))
+        .exceptionally(
+            e -> {
+              e = e.getCause();
+              if (e instanceof ErrorResponseException) {
+                if (((ErrorResponseException) e)
+                    .errorResponse()
+                    .code()
+                    .equals("NoSuchCORSConfiguration")) {
+                  return null;
+                }
+              }
+              throw new CompletionException(e);
+            })
+        .thenApply(
+            response -> {
+              if (response == null) return new CORSConfiguration(null);
+              try {
+                return Xml.unmarshal(CORSConfiguration.class, response.body().charStream());
+              } catch (XmlParserException e) {
+                throw new CompletionException(e);
+              } finally {
+                response.close();
+              }
+            });
+  }
+
+  /**
+   * Sets CORS configuration to a bucket.
+   *
+   * <pre>Example:{@code
+   * CORSConfiguration config =
+   *     new CORSConfiguration(
+   *         Arrays.asList(
+   *             new CORSConfiguration.CORSRule[] {
+   *               // Rule 1
+   *               new CORSConfiguration.CORSRule(
+   *                   Arrays.asList(new String[] {"*"}), // Allowed headers
+   *                   Arrays.asList(new String[] {"PUT", "POST", "DELETE"}), // Allowed methods
+   *                   Arrays.asList(new String[] {"http://www.example.com"}), // Allowed origins
+   *                   Arrays.asList(
+   *                       new String[] {"x-amz-server-side-encryption"}), // Expose headers
+   *                   null, // ID
+   *                   3000), // Maximum age seconds
+   *               // Rule 2
+   *               new CORSConfiguration.CORSRule(
+   *                   null, // Allowed headers
+   *                   Arrays.asList(new String[] {"GET"}), // Allowed methods
+   *                   Arrays.asList(new String[] {"*"}), // Allowed origins
+   *                   null, // Expose headers
+   *                   null, // ID
+   *                   null // Maximum age seconds
+   *                   )
+   *             }));
+   * CompletableFuture<Void> future = minioAsyncClient.setBucketCors(
+   *     SetBucketCorsArgs.builder().bucket("my-bucketname").config(config).build());
+   * }</pre>
+   *
+   * @param args {@link SetBucketCorsArgs} object.
+   * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
+   */
+  public CompletableFuture<Void> setBucketCors(SetBucketCorsArgs args) {
+    checkArgs(args);
+    Http.Body body = null;
+    try {
+      body = new Http.Body(args.config(), null, null, null);
+    } catch (MinioException e) {
+      return Utils.failedFuture(e);
+    }
+    return executePutAsync(args, null, new Http.QueryParameters("cors", ""), body)
+        .thenAccept(response -> response.close());
+  }
+
+  /**
+   * Deletes CORS configuration of a bucket.
+   *
+   * <pre>Example:{@code
+   * CompletableFuture<Void> future = minioAsyncClient.deleteBucketCors(
+   *     DeleteBucketCorsArgs.builder().bucket("my-bucketname").build());
+   * }</pre>
+   *
+   * @param args {@link DeleteBucketCorsArgs} object.
+   * @return {@link CompletableFuture}&lt;{@link Void}&gt; object.
+   */
+  public CompletableFuture<Void> deleteBucketCors(DeleteBucketCorsArgs args) {
+    checkArgs(args);
+    return executeDeleteAsync(args, null, new Http.QueryParameters("cors", ""))
+        .thenAccept(response -> response.close());
+  }
+
+  /**
+   * Gets access control policy of an object.
+   *
+   * <pre>Example:{@code
+   * CompletableFuture<AccessControlPolicy> future =
+   *     minioAsyncClient.getObjectAcl(
+   *         GetObjectAclArgs.builder().bucket("my-bucketname").object("my-objectname").build());
+   * }</pre>
+   *
+   * @param args {@link GetObjectAclArgs} object.
+   * @return {@link CompletableFuture}&lt;{@link AccessControlPolicy}&gt; object.
+   */
+  public CompletableFuture<AccessControlPolicy> getObjectAcl(GetObjectAclArgs args) {
+    checkArgs(args);
+    Http.QueryParameters queryParams = new Http.QueryParameters("acl", "");
+    if (args.versionId() != null) queryParams.put("versionId", args.versionId());
+    return executeGetAsync(args, null, queryParams)
+        .thenApply(
+            response -> {
+              try {
+                return Xml.unmarshal(AccessControlPolicy.class, response.body().charStream());
+              } catch (XmlParserException e) {
+                throw new CompletionException(e);
+              } finally {
+                response.close();
+              }
+            });
+  }
+
+  /**
+   * Gets attributes of an object.
+   *
+   * <pre>Example:{@code
+   * CompletableFuture<GetObjectAttributesResponse> future =
+   *     minioAsyncClient.getObjectAttributes(
+   *         GetObjectAttributesArgs.builder()
+   *             .bucket("my-bucketname")
+   *             .object("my-objectname")
+   *             .objectAttributes(
+   *                 new String[] {
+   *                   "ETag", "Checksum", "ObjectParts", "StorageClass", "ObjectSize"
+   *                 })
+   *             .build());
+   * }</pre>
+   *
+   * @param args {@link GetObjectAttributesArgs} object.
+   * @return {@link CompletableFuture}&lt;{@link GetObjectAttributesResponse}&gt; object.
+   */
+  public CompletableFuture<GetObjectAttributesResponse> getObjectAttributes(
+      GetObjectAttributesArgs args) {
+    checkArgs(args);
+
+    Http.QueryParameters queryParams = new Http.QueryParameters("attributes", "");
+    if (args.versionId() != null) queryParams.put("versionId", args.versionId());
+
+    Http.Headers headers = new Http.Headers();
+    if (args.maxParts() != null) headers.put("x-amz-max-parts", args.maxParts().toString());
+    if (args.partNumberMarker() != null) {
+      headers.put("x-amz-part-number-marker", args.partNumberMarker().toString());
+    }
+    for (String attribute : args.objectAttributes()) {
+      if (attribute != null) headers.put("x-amz-object-attributes", attribute);
+    }
+
+    return executeGetAsync(args, headers, queryParams)
+        .thenApply(
+            response -> {
+              try {
+                GetObjectAttributesOutput result =
+                    Xml.unmarshal(GetObjectAttributesOutput.class, response.body().charStream());
+
+                String value = response.headers().get("x-amz-delete-marker");
+                if (value != null) result.setDeleteMarker(Boolean.valueOf(value));
+                value = response.headers().get("Last-Modified");
+                if (value != null) {
+                  result.setLastModified(ZonedDateTime.parse(value, Time.HTTP_HEADER_DATE_FORMAT));
+                }
+                result.setVersionId(response.headers().get("x-amz-version-id"));
+
+                return new GetObjectAttributesResponse(
+                    response.headers(), args.bucket(), args.region(), args.object(), result);
+              } catch (XmlParserException e) {
+                throw new CompletionException(e);
+              } finally {
+                response.close();
+              }
+            });
   }
 
   /**
@@ -3081,20 +3215,12 @@ public class MinioAsyncClient extends S3Base {
    *
    * @param args {@link UploadSnowballObjectsArgs} object.
    * @return {@link CompletableFuture}&lt;{@link ObjectWriteResponse}&gt; object.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
    */
   public CompletableFuture<ObjectWriteResponse> uploadSnowballObjects(
-      UploadSnowballObjectsArgs args)
-      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
-          NoSuchAlgorithmException, XmlParserException {
+      UploadSnowballObjectsArgs args) {
     checkArgs(args);
 
-    return CompletableFuture.supplyAsync(
+    return supplyAsync(
             () -> {
               FileOutputStream fos = null;
               BufferedOutputStream bos = null;
@@ -3139,7 +3265,7 @@ public class MinioAsyncClient extends S3Base {
                 }
                 tarOutputStream.finish();
               } catch (IOException e) {
-                throw new CompletionException(e);
+                throw new CompletionException(new MinioException(e));
               } finally {
                 try {
                   if (tarOutputStream != null) tarOutputStream.flush();
@@ -3151,36 +3277,19 @@ public class MinioAsyncClient extends S3Base {
                   if (bos != null) bos.close();
                   if (fos != null) fos.close();
                 } catch (IOException e) {
-                  throw new CompletionException(e);
+                  throw new CompletionException(new MinioException(e));
                 }
               }
               return baos;
             })
         .thenCompose(
             baos -> {
-              Multimap<String, String> headers = newMultimap(args.extraHeaders());
-              headers.putAll(args.genHeaders());
+              Http.Headers headers = args.makeHeaders();
               headers.put("X-Amz-Meta-Snowball-Auto-Extract", "true");
 
               if (args.stagingFilename() == null) {
                 byte[] data = baos.toByteArray();
-                try {
-                  return putObjectAsync(
-                      args.bucket(),
-                      args.region(),
-                      args.object(),
-                      data,
-                      data.length,
-                      headers,
-                      args.extraQueryParams());
-                } catch (InsufficientDataException
-                    | InternalException
-                    | InvalidKeyException
-                    | IOException
-                    | NoSuchAlgorithmException
-                    | XmlParserException e) {
-                  throw new CompletionException(e);
-                }
+                return putObject(new PutObjectAPIArgs(args, data, data.length, headers));
               }
 
               long length = Paths.get(args.stagingFilename()).toFile().length();
@@ -3189,175 +3298,709 @@ public class MinioAsyncClient extends S3Base {
                     "tarball size " + length + " is more than maximum allowed 5TiB");
               }
               try (RandomAccessFile file = new RandomAccessFile(args.stagingFilename(), "r")) {
-                return putObjectAsync(
-                    args.bucket(),
-                    args.region(),
-                    args.object(),
-                    file,
-                    length,
-                    headers,
-                    args.extraQueryParams());
-              } catch (InsufficientDataException
-                  | InternalException
-                  | InvalidKeyException
-                  | IOException
-                  | NoSuchAlgorithmException
-                  | XmlParserException e) {
-                throw new CompletionException(e);
+                return putObject(new PutObjectAPIArgs(args, file, length, headers));
+              } catch (IOException e) {
+                throw new CompletionException(new MinioException(e));
               }
             });
   }
 
-  public static Builder builder() {
-    return new Builder();
+  /**
+   * Uploads multiple objects with same content from single stream with optional metadata and tags.
+   *
+   * <pre>Example:{@code
+   * Map<String, String> map = new HashMap<>();
+   * map.put("Project", "Project One");
+   * map.put("User", "jsmith");
+   * CompletableFuture<PutObjectFanOutResponse> future =
+   *     minioAsyncClient.putObjectFanOut(
+   *         PutObjectFanOutArgs.builder().bucket("my-bucketname").stream(
+   *                 new ByteArrayInputStream("somedata".getBytes(StandardCharsets.UTF_8)), 8)
+   *             .entries(
+   *                 Arrays.asList(
+   *                     new PutObjectFanOutEntry[] {
+   *                       PutObjectFanOutEntry.builder().key("fan-out.0").build(),
+   *                       PutObjectFanOutEntry.builder().key("fan-out.1").tags(map).build()
+   *                     }))
+   *             .build());
+   * }</pre>
+   *
+   * @param args {@link PutObjectFanOutArgs} object.
+   * @return {@link CompletableFuture}&lt;{@link PutObjectFanOutResponse}&gt; object.
+   */
+  public CompletableFuture<PutObjectFanOutResponse> putObjectFanOut(PutObjectFanOutArgs args) {
+    checkArgs(args);
+    args.validateSse(this.baseUrl.isHttps());
+
+    return supplyAsync(
+            () -> {
+              byte[] buf16k = new byte[16384]; // 16KiB buffer for optimization.
+              ByteBuffer buffer = new ByteBuffer(args.size());
+              long bytesWritten = 0;
+              while (bytesWritten != args.size()) {
+                try {
+                  int length = args.stream().read(buf16k);
+                  if (length < 0) {
+                    throw new InsufficientDataException(
+                        "insufficient data; expected=" + args.size() + ", got=" + bytesWritten);
+                  }
+                  buffer.write(buf16k, 0, length);
+                  bytesWritten += length;
+                } catch (IOException e) {
+                  throw new CompletionException(new MinioException(e));
+                } catch (MinioException e) {
+                  throw new CompletionException(e);
+                }
+              }
+
+              // Build POST object data
+              String objectName =
+                  "fan-out-"
+                      + new BigInteger(32, RANDOM).toString(32)
+                      + "-"
+                      + System.currentTimeMillis();
+              PostPolicy policy =
+                  new PostPolicy(args.bucket(), ZonedDateTime.now().plusMinutes(15));
+              policy.addEqualsCondition("key", objectName);
+              if (args.sse() != null) {
+                for (Map.Entry<String, String> entry : args.sse().headers().entrySet()) {
+                  policy.addEqualsCondition(entry.getKey(), entry.getValue());
+                }
+              }
+              if (args.checksum() != null) {
+                for (Map.Entry<String, String> entry : args.checksum().headers().entries()) {
+                  policy.addEqualsCondition(entry.getKey(), entry.getValue());
+                }
+              }
+
+              try {
+                Map<String, String> formData = this.getPresignedPostFormData(policy);
+
+                // Build MultipartBody
+                MultipartBody.Builder multipartBuilder = new MultipartBody.Builder();
+                multipartBuilder.setType(MultipartBody.FORM);
+                for (Map.Entry<String, String> entry : formData.entrySet()) {
+                  multipartBuilder.addFormDataPart(entry.getKey(), entry.getValue());
+                }
+                multipartBuilder.addFormDataPart("key", objectName);
+                multipartBuilder.addFormDataPart("x-minio-fanout-list", args.fanOutList());
+                // "file" must be added at last.
+                multipartBuilder.addFormDataPart(
+                    "file",
+                    "fanout-content",
+                    new Http.RequestBody(buffer, Http.DEFAULT_MEDIA_TYPE));
+
+                return multipartBuilder.build();
+              } catch (JsonProcessingException e) {
+                throw new CompletionException(new MinioException(e));
+              } catch (MinioException e) {
+                throw new CompletionException(e);
+              }
+            })
+        .thenCompose(body -> executePostAsync(args, null, null, new Http.Body(body)))
+        .thenApply(
+            response -> {
+              try {
+                JsonFactory jsonFactory = new JsonFactory();
+                Iterator<PutObjectFanOutResponse.Result> iterator =
+                    OBJECT_MAPPER.readValues(
+                        jsonFactory.createParser(response.body().byteStream()),
+                        PutObjectFanOutResponse.Result.class);
+                List<PutObjectFanOutResponse.Result> results = new ArrayList<>();
+                iterator.forEachRemaining(results::add);
+                return new PutObjectFanOutResponse(
+                    response.headers(), args.bucket(), args.region(), results);
+              } catch (IOException e) {
+                throw new CompletionException(new MinioException(e));
+              } finally {
+                response.close();
+              }
+            });
   }
 
-  /** Argument builder of {@link MinioClient}. */
-  public static final class Builder {
-    private HttpUrl baseUrl;
-    private String awsS3Prefix;
-    private String awsDomainSuffix;
-    private boolean awsDualstack;
-    private boolean useVirtualStyle;
+  /**
+   * Performs language model inference with the prompt and referenced object as context.
+   *
+   * @param args {@link PromptObjectArgs} object.
+   * @return {@link CompletableFuture}&lt;{@link PromptObjectResponse}&gt; object.
+   */
+  public CompletableFuture<PromptObjectResponse> promptObject(PromptObjectArgs args) {
+    checkArgs(args);
 
-    private String region;
-    private Provider provider;
-    private OkHttpClient httpClient;
+    Http.QueryParameters queryParams = new Http.QueryParameters("lambdaArn", args.lambdaArn());
+    if (args.versionId() == null) queryParams.put("versionId", args.versionId());
+    Http.Headers headers =
+        Http.Headers.merge(
+            new Http.Headers(args.headers()),
+            new Http.Headers(Http.Headers.CONTENT_TYPE, Http.JSON_MEDIA_TYPE.toString()));
 
-    private void setAwsInfo(String host, boolean https) {
-      this.awsS3Prefix = null;
-      this.awsDomainSuffix = null;
-      this.awsDualstack = false;
+    Map<String, Object> promptArgs = args.promptArgs();
+    if (promptArgs == null) promptArgs = new HashMap<>();
+    promptArgs.put("prompt", args.prompt());
+    try {
+      byte[] data = OBJECT_MAPPER.writeValueAsString(promptArgs).getBytes(StandardCharsets.UTF_8);
+      return executePostAsync(
+              args, headers, queryParams, new Http.Body(data, data.length, null, null, null))
+          .thenApply(
+              response -> {
+                return new PromptObjectResponse(
+                    response.headers(),
+                    args.bucket(),
+                    args.region(),
+                    args.object(),
+                    response.body().byteStream());
+              });
+    } catch (JsonProcessingException e) {
+      return Utils.failedFuture(new MinioException(e));
+    }
+  }
 
-      if (!HttpUtils.HOSTNAME_REGEX.matcher(host).find()) return;
+  private CompletableFuture<ObjectWriteResponse> appendObject(
+      AppendObjectArgs args,
+      long writeOffset,
+      PartReader partReader,
+      ByteBuffer buffer,
+      byte[] data,
+      Long length,
+      RandomAccessFile file,
+      Long partSize,
+      Map<Checksum.Algorithm, Checksum.Hasher> hashers,
+      boolean addContentSha256,
+      boolean addSha256Checksum) {
+    Http.Headers headers =
+        new Http.Headers("x-amz-write-offset-bytes", String.valueOf(writeOffset));
 
-      if (HttpUtils.AWS_ELB_ENDPOINT_REGEX.matcher(host).find()) {
-        String[] tokens = host.split("\\.elb\\.amazonaws\\.com", 1)[0].split("\\.");
-        this.region = tokens[tokens.length - 1];
-        return;
+    if (data != null) {
+      if (hashers != null) {
+        Checksum.update(hashers, data, length.intValue());
+        headers.putAll(Checksum.makeHeaders(hashers, addContentSha256, addSha256Checksum));
+      }
+      return putObject(new PutObjectAPIArgs(args, data, length.intValue(), headers));
+    }
+
+    if (partReader != null) {
+      if (partReader.hashers() != null) {
+        headers.putAll(
+            Checksum.makeHeaders(partReader.hashers(), addContentSha256, addSha256Checksum));
+      }
+      return putObject(new PutObjectAPIArgs(args, buffer, headers))
+          .thenCompose(
+              response -> {
+                long finalWriteOffset = writeOffset + buffer.length();
+                try {
+                  buffer.reset();
+                  if (partReader.partNumber() == partReader.partCount()) {
+                    return CompletableFuture.completedFuture(response);
+                  }
+                  partReader.read(buffer);
+                } catch (MinioException e) {
+                  return Utils.failedFuture(e);
+                }
+                return appendObject(
+                    args,
+                    finalWriteOffset,
+                    partReader,
+                    buffer,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    addContentSha256,
+                    addSha256Checksum);
+              });
+    }
+
+    long size = Math.min(length, partSize);
+    if (hashers != null) {
+      for (Map.Entry<Checksum.Algorithm, Checksum.Hasher> entry : hashers.entrySet()) {
+        entry.getValue().reset();
       }
 
-      if (!HttpUtils.AWS_ENDPOINT_REGEX.matcher(host).find()) return;
-
-      if (!HttpUtils.AWS_S3_ENDPOINT_REGEX.matcher(host).find()) {
-        throw new IllegalArgumentException("invalid Amazon AWS host " + host);
+      try {
+        long position = file.getFilePointer();
+        Checksum.update(hashers, file, size);
+        file.seek(position);
+      } catch (MinioException e) {
+        return Utils.failedFuture(e);
+      } catch (IOException e) {
+        return Utils.failedFuture(new MinioException(e));
       }
 
-      Matcher matcher = HttpUtils.AWS_S3_PREFIX_REGEX.matcher(host);
-      matcher.lookingAt();
-      int end = matcher.end();
+      headers.putAll(Checksum.makeHeaders(hashers, addContentSha256, addSha256Checksum));
+    }
 
-      this.awsS3Prefix = host.substring(0, end);
-      if (this.awsS3Prefix.contains("s3-accesspoint") && !https) {
-        throw new IllegalArgumentException("use HTTPS scheme for host " + host);
+    return putObject(new PutObjectAPIArgs(args, file, size, headers))
+        .thenCompose(
+            response -> {
+              long finalWriteOffset = writeOffset + size;
+              long finalLength = length - size;
+              if (finalLength == 0) {
+                return CompletableFuture.completedFuture(response);
+              }
+              return appendObject(
+                  args,
+                  finalWriteOffset,
+                  null,
+                  null,
+                  null,
+                  finalLength,
+                  file,
+                  partSize,
+                  hashers,
+                  addContentSha256,
+                  addSha256Checksum);
+            });
+  }
+
+  /**
+   * Appends from a file, stream or data to existing object in a bucket.
+   *
+   * @param args {@link AppendObjectArgs} object.
+   * @return {@link CompletableFuture}&lt;{@link ObjectWriteResponse}&gt; object.
+   */
+  public CompletableFuture<ObjectWriteResponse> appendObject(AppendObjectArgs args) {
+    checkArgs(args);
+    return headObject(new HeadObjectArgs(args))
+        .thenCompose(
+            response -> {
+              Checksum.Algorithm algorithm = null;
+              if (response.checksumType() != null) {
+                if (response.checksumType() != Checksum.Type.FULL_OBJECT) {
+                  return Utils.failedFuture(
+                      new MinioException(
+                          "append object does not support checksum type "
+                              + response.checksumType()));
+                }
+                Map<Checksum.Algorithm, String> checksums = response.checksums();
+                if (checksums != null && !checksums.isEmpty()) {
+                  algorithm = checksums.keySet().iterator().next();
+                }
+              }
+
+              long writeOffset = response.size();
+
+              long partSize =
+                  args.chunkSize() != null ? args.chunkSize() : ObjectWriteArgs.MIN_MULTIPART_SIZE;
+
+              boolean addContentSha256 = !this.baseUrl.isHttps();
+              boolean addSha256Checksum = algorithm == Checksum.Algorithm.SHA256;
+              Checksum.Algorithm[] algorithms;
+              if (addContentSha256 && !addSha256Checksum) {
+                algorithms =
+                    (algorithm != null)
+                        ? new Checksum.Algorithm[] {algorithm, Checksum.Algorithm.SHA256}
+                        : new Checksum.Algorithm[] {Checksum.Algorithm.SHA256};
+              } else {
+                algorithms =
+                    (algorithm != null)
+                        ? new Checksum.Algorithm[] {algorithm}
+                        : new Checksum.Algorithm[0];
+              }
+
+              if (args.stream() != null) {
+                try {
+                  int partCount =
+                      args.length() == null
+                          ? -1
+                          : (int) Math.max((args.length() + partSize - 1) / partSize, 1);
+                  PartReader partReader =
+                      new PartReader(args.stream(), args.length(), partSize, partCount, algorithms);
+                  ByteBuffer buffer =
+                      new ByteBuffer(partReader.partCount() == 1 ? args.length() : partSize);
+                  partReader.read(buffer);
+                  return appendObject(
+                      args,
+                      writeOffset,
+                      partReader,
+                      buffer,
+                      null,
+                      null,
+                      null,
+                      null,
+                      null,
+                      addContentSha256,
+                      addSha256Checksum);
+                } catch (MinioException e) {
+                  return Utils.failedFuture(e);
+                }
+              }
+
+              try {
+                Map<Checksum.Algorithm, Checksum.Hasher> hashers =
+                    Checksum.newHasherMap(algorithms);
+                if (args.data() != null) {
+                  return appendObject(
+                      args,
+                      writeOffset,
+                      null,
+                      null,
+                      args.data(),
+                      args.length(),
+                      null,
+                      null,
+                      hashers,
+                      addContentSha256,
+                      addSha256Checksum);
+                }
+
+                RandomAccessFile file = new RandomAccessFile(args.filename(), "r");
+                return appendObject(
+                    args,
+                    writeOffset,
+                    null,
+                    null,
+                    null,
+                    args.length(),
+                    file,
+                    partSize,
+                    hashers,
+                    addContentSha256,
+                    addSha256Checksum);
+              } catch (MinioException e) {
+                return Utils.failedFuture(e);
+              } catch (IOException e) {
+                return Utils.failedFuture(new MinioException(e));
+              }
+            });
+  }
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////
+  ///////////////////////////// Higher level ListObjects implementation ///////////////////////////
+  /////////////////////////////////////////////////////////////////////////////////////////////////
+
+  /** Throws encapsulated exception wrapped by {@link CompletionException}. */
+  public void throwMinioException(CompletionException e) throws MinioException {
+    if (e == null) return;
+    Throwable ex = e.getCause();
+    if (ex instanceof MinioException) throw (MinioException) ex;
+    Throwable exc = ex.getCause();
+    throw new RuntimeException(exc != null ? exc : ex);
+  }
+
+  private abstract class ObjectIterator implements Iterator<Result<Item>> {
+    protected Result<Item> error;
+    protected Iterator<? extends Item> itemIterator;
+    protected Iterator<ListVersionsResult.DeleteMarker> deleteMarkerIterator;
+    protected Iterator<ListObjectsResult.Prefix> prefixIterator;
+    protected boolean completed = false;
+    protected ListObjectsResult listObjectsResult;
+    protected String lastObjectName;
+
+    protected abstract void populateResult() throws MinioException;
+
+    protected synchronized void populate() {
+      try {
+        populateResult();
+      } catch (MinioException e) {
+        this.error = new Result<>(e);
       }
 
-      String[] tokens = host.substring(end).split("\\.");
-      awsDualstack = "dualstack".equals(tokens[0]);
-      if (awsDualstack) tokens = Arrays.copyOfRange(tokens, 1, tokens.length);
-      String regionInHost = null;
-      if (!tokens[0].equals("vpce") && !tokens[0].equals("amazonaws")) {
-        regionInHost = tokens[0];
-        tokens = Arrays.copyOfRange(tokens, 1, tokens.length);
+      if (this.listObjectsResult != null) {
+        this.itemIterator = this.listObjectsResult.contents().iterator();
+        this.deleteMarkerIterator = this.listObjectsResult.deleteMarkers().iterator();
+        this.prefixIterator = this.listObjectsResult.commonPrefixes().iterator();
+      } else {
+        this.itemIterator = Collections.emptyIterator();
+        this.deleteMarkerIterator = Collections.emptyIterator();
+        this.prefixIterator = Collections.emptyIterator();
       }
-      this.awsDomainSuffix = String.join(".", tokens);
-
-      if (host.equals("s3-external-1.amazonaws.com")) regionInHost = "us-east-1";
-      if (host.equals("s3-us-gov-west-1.amazonaws.com")
-          || host.equals("s3-fips-us-gov-west-1.amazonaws.com")) {
-        regionInHost = "us-gov-west-1";
-      }
-
-      if (regionInHost != null) this.region = regionInHost;
     }
 
-    private void setBaseUrl(HttpUrl url) {
-      this.baseUrl = url;
-      this.setAwsInfo(url.host(), url.isHttps());
-      this.useVirtualStyle = this.awsDomainSuffix != null || url.host().endsWith("aliyuncs.com");
-    }
+    @Override
+    public boolean hasNext() {
+      if (this.completed) return false;
 
-    public Builder endpoint(String endpoint) {
-      setBaseUrl(HttpUtils.getBaseUrl(endpoint));
-      return this;
-    }
-
-    public Builder endpoint(String endpoint, int port, boolean secure) {
-      HttpUrl url = HttpUtils.getBaseUrl(endpoint);
-      if (port < 1 || port > 65535) {
-        throw new IllegalArgumentException("port must be in range of 1 to 65535");
-      }
-      url = url.newBuilder().port(port).scheme(secure ? "https" : "http").build();
-
-      setBaseUrl(url);
-      return this;
-    }
-
-    public Builder endpoint(URL url) {
-      HttpUtils.validateNotNull(url, "url");
-      return endpoint(HttpUrl.get(url));
-    }
-
-    public Builder endpoint(HttpUrl url) {
-      HttpUtils.validateNotNull(url, "url");
-      HttpUtils.validateUrl(url);
-      setBaseUrl(url);
-      return this;
-    }
-
-    public Builder region(String region) {
-      if (region != null && !HttpUtils.REGION_REGEX.matcher(region).find()) {
-        throw new IllegalArgumentException("invalid region " + region);
-      }
-      this.region = region;
-      return this;
-    }
-
-    public Builder credentials(String accessKey, String secretKey) {
-      this.provider = new StaticProvider(accessKey, secretKey, null);
-      return this;
-    }
-
-    public Builder credentialsProvider(Provider provider) {
-      this.provider = provider;
-      return this;
-    }
-
-    public Builder httpClient(OkHttpClient httpClient) {
-      HttpUtils.validateNotNull(httpClient, "http client");
-      this.httpClient = httpClient;
-      return this;
-    }
-
-    public MinioAsyncClient build() {
-      HttpUtils.validateNotNull(this.baseUrl, "endpoint");
-
-      if (this.awsDomainSuffix != null
-          && this.awsDomainSuffix.endsWith(".cn")
-          && !this.awsS3Prefix.endsWith("s3-accelerate.")
-          && this.region == null) {
-        throw new IllegalArgumentException(
-            "Region missing in Amazon S3 China endpoint " + this.baseUrl);
+      if (this.error == null
+          && this.itemIterator == null
+          && this.deleteMarkerIterator == null
+          && this.prefixIterator == null) {
+        populate();
       }
 
-      boolean closeHttpClient = false;
-      if (this.httpClient == null) {
-        this.httpClient =
-            HttpUtils.newDefaultHttpClient(
-                DEFAULT_CONNECTION_TIMEOUT, DEFAULT_CONNECTION_TIMEOUT, DEFAULT_CONNECTION_TIMEOUT);
-        closeHttpClient = true;
+      if (this.error == null
+          && !this.itemIterator.hasNext()
+          && !this.deleteMarkerIterator.hasNext()
+          && !this.prefixIterator.hasNext()
+          && this.listObjectsResult.isTruncated()) {
+        populate();
       }
 
-      return new MinioAsyncClient(
-          baseUrl,
-          awsS3Prefix,
-          awsDomainSuffix,
-          awsDualstack,
-          useVirtualStyle,
-          region,
-          provider,
-          httpClient,
-          closeHttpClient);
+      if (this.error != null) return true;
+      if (this.itemIterator.hasNext()) return true;
+      if (this.deleteMarkerIterator.hasNext()) return true;
+      if (this.prefixIterator.hasNext()) return true;
+
+      this.completed = true;
+      return false;
+    }
+
+    @Override
+    public Result<Item> next() {
+      if (this.completed) throw new NoSuchElementException();
+      if (this.error == null
+          && this.itemIterator == null
+          && this.deleteMarkerIterator == null
+          && this.prefixIterator == null) {
+        populate();
+      }
+
+      if (this.error == null
+          && !this.itemIterator.hasNext()
+          && !this.deleteMarkerIterator.hasNext()
+          && !this.prefixIterator.hasNext()
+          && this.listObjectsResult.isTruncated()) {
+        populate();
+      }
+
+      if (this.error != null) {
+        this.completed = true;
+        return this.error;
+      }
+
+      Item item = null;
+      if (this.itemIterator.hasNext()) {
+        item = this.itemIterator.next();
+        item.setEncodingType(this.listObjectsResult.encodingType());
+        this.lastObjectName = item.objectName();
+      } else if (this.deleteMarkerIterator.hasNext()) {
+        item = this.deleteMarkerIterator.next();
+      } else if (this.prefixIterator.hasNext()) {
+        item = this.prefixIterator.next().toItem();
+      }
+
+      if (item != null) {
+        item.setEncodingType(this.listObjectsResult.encodingType());
+        return new Result<>(item);
+      }
+
+      this.completed = true;
+      throw new NoSuchElementException();
+    }
+
+    @Override
+    public void remove() {
+      throw new UnsupportedOperationException();
+    }
+  }
+
+  /** Execute list objects v1. */
+  protected Iterable<Result<Item>> objectV1Lister(ListObjectsV1Args args) {
+    return new Iterable<Result<Item>>() {
+      @Override
+      public Iterator<Result<Item>> iterator() {
+        return new ObjectIterator() {
+          private ListBucketResultV1 result = null;
+
+          @Override
+          protected void populateResult() throws MinioException {
+            this.listObjectsResult = null;
+            this.itemIterator = null;
+            this.prefixIterator = null;
+
+            String nextMarker = (result == null) ? args.marker() : result.nextMarker();
+            if (nextMarker == null) nextMarker = this.lastObjectName;
+
+            try {
+              ListObjectsV1Response response =
+                  listObjectsV1(
+                          ListObjectsV1Args.builder()
+                              .extraHeaders(args.extraHeaders())
+                              .extraQueryParams(args.extraQueryParams())
+                              .bucket(args.bucket())
+                              .region(args.region())
+                              .delimiter(args.delimiter())
+                              .encodingType(args.encodingType())
+                              .maxKeys(args.maxKeys())
+                              .prefix(args.prefix())
+                              .marker(nextMarker)
+                              .build())
+                      .join();
+              result = response.result();
+              this.listObjectsResult = response.result();
+            } catch (CompletionException e) {
+              throwMinioException(e);
+            }
+          }
+        };
+      }
+    };
+  }
+
+  /** Execute list objects v2. */
+  protected Iterable<Result<Item>> objectV2Lister(ListObjectsV2Args args) {
+    return new Iterable<Result<Item>>() {
+      @Override
+      public Iterator<Result<Item>> iterator() {
+        return new ObjectIterator() {
+          private ListBucketResultV2 result = null;
+
+          @Override
+          protected void populateResult() throws MinioException {
+            this.listObjectsResult = null;
+            this.itemIterator = null;
+            this.prefixIterator = null;
+
+            try {
+              ListObjectsV2Response response =
+                  listObjectsV2(
+                          ListObjectsV2Args.builder()
+                              .extraHeaders(args.extraHeaders())
+                              .extraQueryParams(args.extraQueryParams())
+                              .bucket(args.bucket())
+                              .region(args.region())
+                              .delimiter(args.delimiter())
+                              .encodingType(args.encodingType())
+                              .maxKeys(args.maxKeys())
+                              .prefix(args.prefix())
+                              .startAfter(args.startAfter())
+                              .continuationToken(
+                                  result == null
+                                      ? args.continuationToken()
+                                      : result.nextContinuationToken())
+                              .fetchOwner(args.fetchOwner())
+                              .includeUserMetadata(args.includeUserMetadata())
+                              .build())
+                      .join();
+              result = response.result();
+              this.listObjectsResult = response.result();
+            } catch (CompletionException e) {
+              throwMinioException(e);
+            }
+          }
+        };
+      }
+    };
+  }
+
+  /** Execute list object versions. */
+  protected Iterable<Result<Item>> objectVersionLister(ListObjectVersionsArgs args) {
+    return new Iterable<Result<Item>>() {
+      @Override
+      public Iterator<Result<Item>> iterator() {
+        return new ObjectIterator() {
+          private ListVersionsResult result = null;
+
+          @Override
+          protected void populateResult() throws MinioException {
+            this.listObjectsResult = null;
+            this.itemIterator = null;
+            this.prefixIterator = null;
+
+            try {
+              ListObjectVersionsResponse response =
+                  listObjectVersions(
+                          ListObjectVersionsArgs.builder()
+                              .extraHeaders(args.extraHeaders())
+                              .extraQueryParams(args.extraQueryParams())
+                              .bucket(args.bucket())
+                              .region(args.region())
+                              .delimiter(args.delimiter())
+                              .encodingType(args.encodingType())
+                              .maxKeys(args.maxKeys())
+                              .prefix(args.prefix())
+                              .keyMarker(result == null ? args.keyMarker() : result.nextKeyMarker())
+                              .versionIdMarker(
+                                  result == null
+                                      ? args.versionIdMarker()
+                                      : result.nextVersionIdMarker())
+                              .build())
+                      .join();
+              result = response.result();
+              this.listObjectsResult = response.result();
+            } catch (CompletionException e) {
+              throwMinioException(e);
+            }
+          }
+        };
+      }
+    };
+  }
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////
+  /////////////////////////// ListenBucketNotification API implementation /////////////////////////
+  /////////////////////////////////////////////////////////////////////////////////////////////////
+
+  /** Notification result records representation. */
+  protected static class NotificationResultRecords {
+    Response response = null;
+    Scanner scanner = null;
+    ObjectMapper mapper = null;
+
+    public NotificationResultRecords(Response response) {
+      this.response = response;
+      this.scanner = new Scanner(response.body().charStream()).useDelimiter("\n");
+      this.mapper =
+          JsonMapper.builder()
+              .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+              .configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
+              .build();
+    }
+
+    /** returns closeable iterator of result of notification records. */
+    public CloseableIterator<Result<NotificationRecords>> closeableIterator() {
+      return new CloseableIterator<Result<NotificationRecords>>() {
+        String recordsString = null;
+        NotificationRecords records = null;
+        boolean isClosed = false;
+
+        @Override
+        public void close() throws IOException {
+          if (!isClosed) {
+            try {
+              response.body().close();
+              scanner.close();
+            } finally {
+              isClosed = true;
+            }
+          }
+        }
+
+        public boolean populate() {
+          if (isClosed) return false;
+          if (recordsString != null) return true;
+
+          while (scanner.hasNext()) {
+            recordsString = scanner.next().trim();
+            if (!recordsString.equals("")) break;
+          }
+
+          if (recordsString == null || recordsString.equals("")) {
+            try {
+              close();
+            } catch (IOException e) {
+              isClosed = true;
+            }
+            return false;
+          }
+          return true;
+        }
+
+        @Override
+        public boolean hasNext() {
+          return populate();
+        }
+
+        @Override
+        public Result<NotificationRecords> next() {
+          if (isClosed) throw new NoSuchElementException();
+          if ((recordsString == null || recordsString.equals("")) && !populate()) {
+            throw new NoSuchElementException();
+          }
+
+          try {
+            records = mapper.readValue(recordsString, NotificationRecords.class);
+            return new Result<>(records);
+          } catch (JsonMappingException | JsonParseException e) {
+            return new Result<>(new MinioException(e));
+          } catch (IOException e) {
+            return new Result<>(new MinioException(e));
+          } finally {
+            recordsString = null;
+            records = null;
+          }
+        }
+      };
     }
   }
 }

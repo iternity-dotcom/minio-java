@@ -16,6 +16,7 @@
 
 package io.minio.messages;
 
+import io.minio.Utils;
 import java.util.List;
 import org.simpleframework.xml.Element;
 import org.simpleframework.xml.ElementList;
@@ -23,7 +24,7 @@ import org.simpleframework.xml.Namespace;
 import org.simpleframework.xml.Root;
 
 /**
- * Object representation of response XML of <a
+ * Response XML of <a
  * href="https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjects.html">ListObjects API</a>.
  */
 @Root(name = "ListBucketResult", strict = false)
@@ -39,15 +40,25 @@ public class ListBucketResultV1 extends ListObjectsResult {
   private List<Contents> contents;
 
   public String marker() {
-    return decodeIfNeeded(marker);
+    return Utils.urlDecode(marker, encodingType());
   }
 
   public String nextMarker() {
-    return decodeIfNeeded(nextMarker);
+    return Utils.urlDecode(nextMarker, encodingType());
   }
 
   @Override
   public List<Contents> contents() {
-    return emptyIfNull(contents);
+    return Utils.unmodifiableList(contents);
+  }
+
+  @Override
+  public String toString() {
+    return String.format(
+        "ListBucketResultV1{%s, marker=%s, nextMarker=%s, contents=%s}",
+        super.toString(),
+        Utils.stringify(marker),
+        Utils.stringify(nextMarker),
+        Utils.stringify(contents));
   }
 }

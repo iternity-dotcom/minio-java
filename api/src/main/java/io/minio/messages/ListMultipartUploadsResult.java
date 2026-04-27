@@ -16,11 +16,9 @@
 
 package io.minio.messages;
 
-import java.io.UnsupportedEncodingException;
-import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
-import java.util.Collections;
-import java.util.LinkedList;
+import io.minio.Time;
+import io.minio.Utils;
+import java.time.ZonedDateTime;
 import java.util.List;
 import org.simpleframework.xml.Element;
 import org.simpleframework.xml.ElementList;
@@ -28,7 +26,7 @@ import org.simpleframework.xml.Namespace;
 import org.simpleframework.xml.Root;
 
 /**
- * Object representation of response XML of <a
+ * Response XML of <a
  * href="https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListMultipartUploads.html">ListMultipartUploads
  * API</a>.
  */
@@ -64,17 +62,6 @@ public class ListMultipartUploadsResult {
 
   public ListMultipartUploadsResult() {}
 
-  private String decodeIfNeeded(String value) {
-    try {
-      return (value != null && "url".equals(encodingType))
-          ? URLDecoder.decode(value, StandardCharsets.UTF_8.name())
-          : value;
-    } catch (UnsupportedEncodingException e) {
-      // This never happens as 'enc' name comes from JDK's own StandardCharsets.
-      throw new RuntimeException(e);
-    }
-  }
-
   /** Returns whether the result is truncated or not. */
   public boolean isTruncated() {
     return isTruncated;
@@ -87,7 +74,7 @@ public class ListMultipartUploadsResult {
 
   /** Returns key marker. */
   public String keyMarker() {
-    return decodeIfNeeded(keyMarker);
+    return Utils.urlDecode(keyMarker, encodingType);
   }
 
   /** Returns upload ID marker. */
@@ -97,7 +84,7 @@ public class ListMultipartUploadsResult {
 
   /** Returns next key marker. */
   public String nextKeyMarker() {
-    return decodeIfNeeded(nextKeyMarker);
+    return Utils.urlDecode(nextKeyMarker, encodingType);
   }
 
   /** Returns next upload ID marker. */
@@ -116,10 +103,125 @@ public class ListMultipartUploadsResult {
 
   /** Returns List of Upload. */
   public List<Upload> uploads() {
-    if (uploads == null) {
-      return Collections.unmodifiableList(new LinkedList<>());
+    return Utils.unmodifiableList(uploads);
+  }
+
+  @Override
+  public String toString() {
+    return String.format(
+        "ListMultipartUploadsResult{bucketName=%s, encodingType=%s, keyMarker=%s,"
+            + " uploadIdMarker=%s, nextKeyMarker=%s, nextUploadIdMarker=%s, maxUploads=%s,"
+            + " isTruncated=%s, uploads=%s}",
+        Utils.stringify(bucketName),
+        Utils.stringify(encodingType),
+        Utils.stringify(keyMarker),
+        Utils.stringify(uploadIdMarker),
+        Utils.stringify(nextKeyMarker),
+        Utils.stringify(nextUploadIdMarker),
+        Utils.stringify(maxUploads),
+        Utils.stringify(isTruncated),
+        Utils.stringify(uploads));
+  }
+
+  /** Upload information of {@link ListMultipartUploadsResult}. */
+  @Root(name = "Upload", strict = false)
+  @Namespace(reference = "http://s3.amazonaws.com/doc/2006-03-01/")
+  public static class Upload {
+    @Element(name = "Key")
+    private String objectName;
+
+    @Element(name = "UploadId")
+    private String uploadId;
+
+    @Element(name = "Initiator")
+    private Initiator initiator;
+
+    @Element(name = "Owner")
+    private Owner owner;
+
+    @Element(name = "StorageClass")
+    private String storageClass;
+
+    @Element(name = "Initiated")
+    private Time.S3Time initiated;
+
+    @Element(name = "ChecksumAlgorithm", required = false)
+    private String checksumAlgorithm;
+
+    @Element(name = "ChecksumType", required = false)
+    private String checksumType;
+
+    private long aggregatedPartSize;
+    private String encodingType = null;
+
+    public Upload() {}
+
+    /** Returns object name. */
+    public String objectName() {
+      return Utils.urlDecode(objectName, encodingType);
     }
 
-    return Collections.unmodifiableList(uploads);
+    /** Returns upload ID. */
+    public String uploadId() {
+      return uploadId;
+    }
+
+    /** Returns initiator information. */
+    public Initiator initiator() {
+      return initiator;
+    }
+
+    /** Returns owner information. */
+    public Owner owner() {
+      return owner;
+    }
+
+    /** Returns storage class. */
+    public String storageClass() {
+      return storageClass;
+    }
+
+    /** Returns initiated time. */
+    public ZonedDateTime initiated() {
+      return initiated == null ? null : initiated.toZonedDateTime();
+    }
+
+    /** Returns aggregated part size. */
+    public long aggregatedPartSize() {
+      return aggregatedPartSize;
+    }
+
+    /** Sets given aggregated part size. */
+    public void setAggregatedPartSize(long size) {
+      this.aggregatedPartSize = size;
+    }
+
+    public void setEncodingType(String encodingType) {
+      this.encodingType = encodingType;
+    }
+
+    public String checksumAlgorithm() {
+      return checksumAlgorithm;
+    }
+
+    public String checksumType() {
+      return checksumType;
+    }
+
+    @Override
+    public String toString() {
+      return String.format(
+          "Upload{objectName=%s, uploadId=%s, initiator=%s, owner=%s, storageClass=%s, "
+              + "initiated=%s, checksumAlgorithm=%s, checksumType=%s, aggregatedPartSize=%s}",
+          Utils.stringify(objectName),
+          Utils.stringify(uploadId),
+          Utils.stringify(initiator),
+          Utils.stringify(owner),
+          Utils.stringify(storageClass),
+          Utils.stringify(initiated),
+          Utils.stringify(checksumAlgorithm),
+          Utils.stringify(checksumType),
+          Utils.stringify(aggregatedPartSize));
+    }
   }
 }

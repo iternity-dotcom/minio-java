@@ -23,7 +23,7 @@ import org.simpleframework.xml.convert.Converter;
 import org.simpleframework.xml.stream.InputNode;
 import org.simpleframework.xml.stream.OutputNode;
 
-/** Amazon AWS S3 event types for notifications. */
+/** S3 event type. */
 @Root(name = "Event")
 @Convert(EventType.EventTypeConverter.class)
 public enum EventType {
@@ -38,6 +38,13 @@ public enum EventType {
   OBJECT_REMOVED_ANY("s3:ObjectRemoved:*"),
   OBJECT_REMOVED_DELETE("s3:ObjectRemoved:Delete"),
   OBJECT_REMOVED_DELETED_MARKER_CREATED("s3:ObjectRemoved:DeleteMarkerCreated"),
+  REPLICATION_ANY("s3:Replication:*"),
+  REPLICATION_OPERATION_FAILED_REPLICATION("s3:Replication:OperationFailedReplication"),
+  REPLICATION_OPERATION_COMPLETED_REPLICATION("s3:Replication:OperationCompletedReplication"),
+  REPLICATION_OPERATION_NOT_TRACKED("s3:Replication:OperationNotTracked"),
+  REPLICATION_OPERATION_MISSED_THRESHOLD("s3:Replication:OperationMissedThreshold"),
+  REPLICATION_OPERATION_REPLICATED_AFTER_THRESHOLD(
+      "s3:Replication:OperationReplicatedAfterThreshold"),
   REDUCED_REDUNDANCY_LOST_OBJECT("s3:ReducedRedundancyLostObject"),
   BUCKET_CREATED("s3:BucketCreated"),
   BUCKET_REMOVED("s3:BucketRemoved");
@@ -57,15 +64,12 @@ public enum EventType {
   public static EventType fromString(String eventTypeString) {
     String s3EventTypeString = "s3:" + eventTypeString;
     for (EventType et : EventType.values()) {
-      if (eventTypeString.equals(et.value) || s3EventTypeString.equals(et.value)) {
-        return et;
-      }
+      if (eventTypeString.equals(et.value) || s3EventTypeString.equals(et.value)) return et;
     }
-
-    throw new IllegalArgumentException("unknown event '" + eventTypeString + "'");
+    throw new IllegalArgumentException("Unknown event '" + eventTypeString + "'");
   }
 
-  /** XML converter class. */
+  /** XML converter of {@link EventType}. */
   public static class EventTypeConverter implements Converter<EventType> {
     @Override
     public EventType read(InputNode node) throws Exception {

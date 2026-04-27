@@ -16,14 +16,20 @@
 
 package io.minio;
 
+import java.time.ZonedDateTime;
 import java.util.Objects;
 
 /**
- * Argument class of {@link MinioAsyncClient#downloadObject} and {@link MinioClient#downloadObject}.
+ * Arguments of {@link MinioAsyncClient#downloadObject(io.minio.DownloadObjectArgs)} and {@link
+ * MinioClient#downloadObject}.
  */
 public class DownloadObjectArgs extends ObjectReadArgs {
   private String filename;
   private boolean overwrite;
+  protected String matchETag;
+  protected String notMatchETag;
+  protected ZonedDateTime modifiedSince;
+  protected ZonedDateTime unmodifiedSince;
 
   public String filename() {
     return filename;
@@ -33,14 +39,30 @@ public class DownloadObjectArgs extends ObjectReadArgs {
     return overwrite;
   }
 
+  public String matchETag() {
+    return matchETag;
+  }
+
+  public String notMatchETag() {
+    return notMatchETag;
+  }
+
+  public ZonedDateTime modifiedSince() {
+    return modifiedSince;
+  }
+
+  public ZonedDateTime unmodifiedSince() {
+    return unmodifiedSince;
+  }
+
   public static Builder builder() {
     return new Builder();
   }
 
-  /** Argument class of {@link DownloadObjectArgs}. */
+  /** Arguments of {@link DownloadObjectArgs}. */
   public static final class Builder extends ObjectReadArgs.Builder<Builder, DownloadObjectArgs> {
     private void validateFilename(String filename) {
-      validateNotEmptyString(filename, "filename");
+      Utils.validateNotEmptyString(filename, "filename");
     }
 
     public Builder filename(String filename) {
@@ -53,6 +75,28 @@ public class DownloadObjectArgs extends ObjectReadArgs {
       operations.add(args -> args.overwrite = flag);
       return this;
     }
+
+    public Builder matchETag(String etag) {
+      Utils.validateNullOrNotEmptyString(etag, "etag");
+      operations.add(args -> args.matchETag = etag);
+      return this;
+    }
+
+    public Builder notMatchETag(String etag) {
+      Utils.validateNullOrNotEmptyString(etag, "etag");
+      operations.add(args -> args.notMatchETag = etag);
+      return this;
+    }
+
+    public Builder modifiedSince(ZonedDateTime modifiedTime) {
+      operations.add(args -> args.modifiedSince = modifiedTime);
+      return this;
+    }
+
+    public Builder unmodifiedSince(ZonedDateTime unmodifiedTime) {
+      operations.add(args -> args.unmodifiedSince = unmodifiedTime);
+      return this;
+    }
   }
 
   @Override
@@ -61,12 +105,23 @@ public class DownloadObjectArgs extends ObjectReadArgs {
     if (!(o instanceof DownloadObjectArgs)) return false;
     if (!super.equals(o)) return false;
     DownloadObjectArgs that = (DownloadObjectArgs) o;
-    if (!Objects.equals(filename, that.filename)) return false;
-    return overwrite == that.overwrite;
+    return Objects.equals(filename, that.filename)
+        && overwrite == that.overwrite
+        && Objects.equals(matchETag, that.matchETag)
+        && Objects.equals(notMatchETag, that.notMatchETag)
+        && Objects.equals(modifiedSince, that.modifiedSince)
+        && Objects.equals(unmodifiedSince, that.unmodifiedSince);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(super.hashCode(), filename, overwrite);
+    return Objects.hash(
+        super.hashCode(),
+        filename,
+        overwrite,
+        matchETag,
+        notMatchETag,
+        modifiedSince,
+        unmodifiedSince);
   }
 }

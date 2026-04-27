@@ -16,6 +16,7 @@
 
 package io.minio.messages;
 
+import io.minio.Utils;
 import java.util.List;
 import org.simpleframework.xml.Element;
 import org.simpleframework.xml.ElementList;
@@ -23,7 +24,7 @@ import org.simpleframework.xml.Namespace;
 import org.simpleframework.xml.Root;
 
 /**
- * Object representation of response XML of <a
+ * Response XML of <a
  * href="https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html">ListObjectVersions
  * API</a>.
  */
@@ -49,11 +50,11 @@ public class ListVersionsResult extends ListObjectsResult {
   private List<DeleteMarker> deleteMarkers;
 
   public String keyMarker() {
-    return decodeIfNeeded(keyMarker);
+    return Utils.urlDecode(keyMarker, encodingType());
   }
 
   public String nextKeyMarker() {
-    return decodeIfNeeded(nextKeyMarker);
+    return Utils.urlDecode(nextKeyMarker, encodingType());
   }
 
   public String versionIdMarker() {
@@ -66,11 +67,59 @@ public class ListVersionsResult extends ListObjectsResult {
 
   @Override
   public List<Version> contents() {
-    return emptyIfNull(contents);
+    return Utils.unmodifiableList(contents);
   }
 
   @Override
   public List<DeleteMarker> deleteMarkers() {
-    return emptyIfNull(deleteMarkers);
+    return Utils.unmodifiableList(deleteMarkers);
+  }
+
+  @Override
+  public String toString() {
+    return String.format(
+        "ListVersionsResult{%s, keyMarker=%s, nextKeyMarker=%s, versionIdMarker=%s,"
+            + " nextVersionIdMarker=%s, contents=%s, deleteMarkers=%s}",
+        super.toString(),
+        Utils.stringify(keyMarker),
+        Utils.stringify(nextKeyMarker),
+        Utils.stringify(versionIdMarker),
+        Utils.stringify(nextVersionIdMarker),
+        Utils.stringify(contents),
+        Utils.stringify(deleteMarkers));
+  }
+
+  /** Object with version information. */
+  @Root(name = "Version", strict = false)
+  public static class Version extends Item {
+    public Version() {
+      super();
+    }
+
+    public Version(String prefix) {
+      super(prefix);
+    }
+
+    @Override
+    public String toString() {
+      return String.format("Version{%s}", super.toString());
+    }
+  }
+
+  /** Delete marker information. */
+  @Root(name = "DeleteMarker", strict = false)
+  public static class DeleteMarker extends Item {
+    public DeleteMarker() {
+      super();
+    }
+
+    public DeleteMarker(String prefix) {
+      super(prefix);
+    }
+
+    @Override
+    public String toString() {
+      return String.format("DeleteMarker{%s}", super.toString());
+    }
   }
 }

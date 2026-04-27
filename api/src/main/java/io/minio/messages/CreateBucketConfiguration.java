@@ -21,7 +21,7 @@ import org.simpleframework.xml.Namespace;
 import org.simpleframework.xml.Root;
 
 /**
- * Object representation of response XML of <a
+ * Request XML of <a
  * href="https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateBucket.html">CreateBucket
  * API</a>.
  */
@@ -32,8 +32,57 @@ public class CreateBucketConfiguration {
   @Element(name = "LocationConstraint")
   private String locationConstraint;
 
+  @Element(name = "Location", required = false)
+  private Location location;
+
+  @Element(name = "Bucket", required = false)
+  private Bucket bucket;
+
+  @Element(name = "Tags", required = false)
+  private Tags tags;
+
   /** Constructs a new CreateBucketConfiguration object with given location constraint. */
   public CreateBucketConfiguration(String locationConstraint) {
     this.locationConstraint = locationConstraint;
+  }
+
+  public CreateBucketConfiguration(
+      String locationConstraint, Location location, Bucket bucket, Tags tags) {
+    this.locationConstraint = locationConstraint;
+    this.location = location;
+    this.bucket = bucket;
+    this.tags = tags;
+  }
+
+  /** Bucket location information of {@link CreateBucketConfiguration}. */
+  @Root(name = "Location", strict = false)
+  @edu.umd.cs.findbugs.annotations.SuppressFBWarnings(value = "URF_UNREAD_FIELD")
+  public static class Location {
+    @Element(name = "Name", required = false)
+    private String name;
+
+    @Element(name = "Type", required = false)
+    private String type;
+
+    public Location(String name, String type) {
+      this.name = name;
+      this.type = type;
+    }
+  }
+
+  /** Bucket properties of {@link CreateBucketConfiguration}. */
+  @Root(name = "Bucket", strict = false)
+  @edu.umd.cs.findbugs.annotations.SuppressFBWarnings(value = "URF_UNREAD_FIELD")
+  public static class Bucket {
+    @Element(name = "DataRedundancy", required = false)
+    private String dataRedundancy;
+
+    @Element(name = "Type", required = false)
+    private String type;
+
+    public Bucket(String dataRedundancy, String type) {
+      this.dataRedundancy = dataRedundancy;
+      this.type = type;
+    }
   }
 }

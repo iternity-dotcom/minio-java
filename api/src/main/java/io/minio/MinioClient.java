@@ -17,19 +17,14 @@
 
 package io.minio;
 
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.minio.credentials.Provider;
-import io.minio.errors.BucketPolicyTooLargeException;
-import io.minio.errors.ErrorResponseException;
-import io.minio.errors.InsufficientDataException;
-import io.minio.errors.InternalException;
-import io.minio.errors.InvalidResponseException;
-import io.minio.errors.ServerException;
-import io.minio.errors.XmlParserException;
-import io.minio.messages.Bucket;
-import io.minio.messages.DeleteError;
+import io.minio.errors.MinioException;
+import io.minio.messages.AccessControlPolicy;
+import io.minio.messages.CORSConfiguration;
+import io.minio.messages.DeleteResult;
 import io.minio.messages.Item;
 import io.minio.messages.LifecycleConfiguration;
+import io.minio.messages.ListAllMyBucketsResult;
 import io.minio.messages.NotificationConfiguration;
 import io.minio.messages.NotificationRecords;
 import io.minio.messages.ObjectLockConfiguration;
@@ -38,16 +33,11 @@ import io.minio.messages.Retention;
 import io.minio.messages.SseConfiguration;
 import io.minio.messages.Tags;
 import io.minio.messages.VersioningConfiguration;
-import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URL;
-import java.security.InvalidKeyException;
-import java.security.KeyManagementException;
-import java.security.NoSuchAlgorithmException;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutionException;
+import java.util.concurrent.CompletionException;
 import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 
@@ -146,37 +136,24 @@ public class MinioClient implements AutoCloseable {
    *
    * @param args {@link StatObjectArgs} object.
    * @return {@link StatObjectResponse} - Populated object information and metadata.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    * @see StatObjectResponse
    */
-  public StatObjectResponse statObject(StatObjectArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public StatObjectResponse statObject(StatObjectArgs args) throws MinioException {
     try {
-      return asyncClient.statObject(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.statObject(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return null;
     }
   }
 
   /**
-   * Gets data from offset to length of a SSE-C encrypted object. Returned {@link InputStream} must
-   * be closed after use to release network resources.
+   * Gets data from offset to length of a SSE-C encrypted object. Returned {@link GetObjectResponse}
+   * must be closed after use to release network resources.
    *
    * <pre>Example:{@code
-   * try (InputStream stream =
+   * try (GetObjectResponse response =
    *     minioClient.getObject(
    *   GetObjectArgs.builder()
    *     .bucket("my-bucketname")
@@ -186,31 +163,19 @@ public class MinioClient implements AutoCloseable {
    *     .ssec(ssec)
    *     .build()
    * ) {
-   *   // Read data from stream
+   *   // Read data from response
+   *   // which is InputStream interface compatible
    * }
    * }</pre>
    *
    * @param args Object of {@link GetObjectArgs}
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public GetObjectResponse getObject(GetObjectArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public GetObjectResponse getObject(GetObjectArgs args) throws MinioException {
     try {
-      return asyncClient.getObject(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.getObject(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return null;
     }
   }
@@ -229,26 +194,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args Object of {@link DownloadObjectArgs}
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void downloadObject(DownloadObjectArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void downloadObject(DownloadObjectArgs args) throws MinioException {
     try {
-      asyncClient.downloadObject(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.downloadObject(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -355,26 +307,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link CopyObjectArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public ObjectWriteResponse copyObject(CopyObjectArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public ObjectWriteResponse copyObject(CopyObjectArgs args) throws MinioException {
     try {
-      return asyncClient.copyObject(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.copyObject(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return null;
     }
   }
@@ -426,26 +365,13 @@ public class MinioClient implements AutoCloseable {
    *
    * @param args {@link ComposeObjectArgs} object.
    * @return {@link ObjectWriteResponse} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public ObjectWriteResponse composeObject(ComposeObjectArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public ObjectWriteResponse composeObject(ComposeObjectArgs args) throws MinioException {
     try {
-      return asyncClient.composeObject(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.composeObject(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return null;
     }
   }
@@ -459,7 +385,7 @@ public class MinioClient implements AutoCloseable {
    * String url =
    *    minioClient.getPresignedObjectUrl(
    *        GetPresignedObjectUrlArgs.builder()
-   *            .method(Method.DELETE)
+   *            .method(Http.Method.DELETE)
    *            .bucket("my-bucketname")
    *            .object("my-objectname")
    *            .expiry(24 * 60 * 60)
@@ -474,7 +400,7 @@ public class MinioClient implements AutoCloseable {
    * String url =
    *    minioClient.getPresignedObjectUrl(
    *        GetPresignedObjectUrlArgs.builder()
-   *            .method(Method.PUT)
+   *            .method(Http.Method.PUT)
    *            .bucket("my-bucketname")
    *            .object("my-objectname")
    *            .expiry(1, TimeUnit.DAYS)
@@ -487,7 +413,7 @@ public class MinioClient implements AutoCloseable {
    * String url =
    *    minioClient.getPresignedObjectUrl(
    *        GetPresignedObjectUrlArgs.builder()
-   *            .method(Method.GET)
+   *            .method(Http.Method.GET)
    *            .bucket("my-bucketname")
    *            .object("my-objectname")
    *            .expiry(2, TimeUnit.HOURS)
@@ -497,21 +423,9 @@ public class MinioClient implements AutoCloseable {
    *
    * @param args {@link GetPresignedObjectUrlArgs} object.
    * @return String - URL string.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
-   * @throws ServerException
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public String getPresignedObjectUrl(GetPresignedObjectUrlArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          XmlParserException, ServerException {
+  public String getPresignedObjectUrl(GetPresignedObjectUrlArgs args) throws MinioException {
     return asyncClient.getPresignedObjectUrl(args);
   }
 
@@ -562,21 +476,10 @@ public class MinioClient implements AutoCloseable {
    *
    * @param policy Post policy of an object.
    * @return {@code Map<String, String>} - Contains form-data to upload an object using POST method.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    * @see PostPolicy
    */
-  public Map<String, String> getPresignedPostFormData(PostPolicy policy)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public Map<String, String> getPresignedPostFormData(PostPolicy policy) throws MinioException {
     return asyncClient.getPresignedPostFormData(policy);
   }
 
@@ -607,26 +510,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link RemoveObjectArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void removeObject(RemoveObjectArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void removeObject(RemoveObjectArgs args) throws MinioException {
     try {
-      asyncClient.removeObject(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.removeObject(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -635,24 +525,25 @@ public class MinioClient implements AutoCloseable {
    * removal.
    *
    * <pre>Example:{@code
-   * List<DeleteObject> objects = new LinkedList<>();
+   * List<DeleteObject> objects = new ArrayList<>();
    * objects.add(new DeleteObject("my-objectname1"));
    * objects.add(new DeleteObject("my-objectname2"));
    * objects.add(new DeleteObject("my-objectname3"));
-   * Iterable<Result<DeleteError>> results =
+   * Iterable<Result<DeleteResult.Error>> results =
    *     minioClient.removeObjects(
    *         RemoveObjectsArgs.builder().bucket("my-bucketname").objects(objects).build());
-   * for (Result<DeleteError> result : results) {
-   *   DeleteError error = errorResult.get();
+   * for (Result<DeleteResult.Error> result : results) {
+   *   DeleteResult.Error error = result.get();
    *   System.out.println(
    *       "Error in deleting object " + error.objectName() + "; " + error.message());
    * }
    * }</pre>
    *
    * @param args {@link RemoveObjectsArgs} object.
-   * @return {@code Iterable<Result<DeleteError>>} - Lazy iterator contains object removal status.
+   * @return {@code Iterable<Result<DeleteResult.Error>>} - Lazy iterator contains object removal
+   *     status.
    */
-  public Iterable<Result<DeleteError>> removeObjects(RemoveObjectsArgs args) {
+  public Iterable<Result<DeleteResult.Error>> removeObjects(RemoveObjectsArgs args) {
     return asyncClient.removeObjects(args);
   }
 
@@ -679,26 +570,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link RestoreObjectArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void restoreObject(RestoreObjectArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void restoreObject(RestoreObjectArgs args) throws MinioException {
     try {
-      asyncClient.restoreObject(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.restoreObject(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -743,7 +621,6 @@ public class MinioClient implements AutoCloseable {
    *
    * @param args Instance of {@link ListObjectsArgs} built using the builder
    * @return {@code Iterable<Result<Item>>} - Lazy iterator contains object information.
-   * @throws XmlParserException upon parsing response xml
    */
   public Iterable<Result<Item>> listObjects(ListObjectsArgs args) {
     return asyncClient.listObjects(args);
@@ -753,33 +630,20 @@ public class MinioClient implements AutoCloseable {
    * Lists bucket information of all buckets.
    *
    * <pre>Example:{@code
-   * List<Bucket> bucketList = minioClient.listBuckets();
+   * List<ListAllMyBucketsResult.Bucket> bucketList = minioClient.listBuckets();
    * for (Bucket bucket : bucketList) {
    *   System.out.println(bucket.creationDate() + ", " + bucket.name());
    * }
    * }</pre>
    *
-   * @return {@code List<Bucket>} - List of bucket information.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @return {@code List<ListAllMyBucketsResult.Bucket>} - List of bucket information.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public List<Bucket> listBuckets()
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public List<ListAllMyBucketsResult.Bucket> listBuckets() throws MinioException {
     try {
-      return asyncClient.listBuckets().get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.listBuckets().join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return null;
     }
   }
@@ -788,36 +652,18 @@ public class MinioClient implements AutoCloseable {
    * Lists bucket information of all buckets.
    *
    * <pre>Example:{@code
-   * List<Bucket> bucketList =
-   *     minioClient.listBuckets(ListBucketsArgs.builder().extraHeaders(headers).build());
-   * for (Bucket bucket : bucketList) {
-   *   System.out.println(bucket.creationDate() + ", " + bucket.name());
+   * Iterable<Result<ListAllMyBucketsResult.Bucket>> results = minioClient.listBuckets(ListBucketsArgs.builder().build());
+   * for (Result<ListAllMyBucketsResult.Bucket> result : results) {
+   *   Bucket bucket = result.get();
+   *   System.out.println(String.format("Bucket: %s, Region: %s, CreationDate: %s", bucket.name(), bucket.bucketRegion(), bucket.creationDate()));
    * }
    * }</pre>
    *
-   * @return {@code List<Bucket>} - List of bucket information.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @return {@link Iterable}&lt;{@link List}&lt;{@link ListAllMyBucketsResult.Bucket}&gt;&gt;
+   *     object.
    */
-  public List<Bucket> listBuckets(ListBucketsArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
-    try {
-      return asyncClient.listBuckets(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
-      return null;
-    }
+  public Iterable<Result<ListAllMyBucketsResult.Bucket>> listBuckets(ListBucketsArgs args) {
+    return asyncClient.listBuckets(args);
   }
 
   /**
@@ -835,26 +681,13 @@ public class MinioClient implements AutoCloseable {
    *
    * @param args {@link BucketExistsArgs} object.
    * @return boolean - True if the bucket exists.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public boolean bucketExists(BucketExistsArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public boolean bucketExists(BucketExistsArgs args) throws MinioException {
     try {
-      return asyncClient.bucketExists(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.bucketExists(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return false;
     }
   }
@@ -886,26 +719,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args Object with bucket name, region and lock functionality
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void makeBucket(MakeBucketArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void makeBucket(MakeBucketArgs args) throws MinioException {
     try {
-      asyncClient.makeBucket(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.makeBucket(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -918,26 +738,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link SetBucketVersioningArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void setBucketVersioning(SetBucketVersioningArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void setBucketVersioning(SetBucketVersioningArgs args) throws MinioException {
     try {
-      asyncClient.setBucketVersioning(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.setBucketVersioning(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -952,26 +759,14 @@ public class MinioClient implements AutoCloseable {
    *
    * @param args {@link GetBucketVersioningArgs} object.
    * @return {@link VersioningConfiguration} - Versioning configuration.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
   public VersioningConfiguration getBucketVersioning(GetBucketVersioningArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+      throws MinioException {
     try {
-      return asyncClient.getBucketVersioning(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.getBucketVersioning(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return null;
     }
   }
@@ -987,26 +782,14 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link SetObjectLockConfigurationArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
   public void setObjectLockConfiguration(SetObjectLockConfigurationArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+      throws MinioException {
     try {
-      asyncClient.setObjectLockConfiguration(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.setObjectLockConfiguration(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -1019,26 +802,14 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link DeleteObjectLockConfigurationArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
   public void deleteObjectLockConfiguration(DeleteObjectLockConfigurationArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+      throws MinioException {
     try {
-      asyncClient.deleteObjectLockConfiguration(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.deleteObjectLockConfiguration(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -1056,26 +827,14 @@ public class MinioClient implements AutoCloseable {
    *
    * @param args {@link GetObjectLockConfigurationArgs} object.
    * @return {@link ObjectLockConfiguration} - Default retention configuration.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
   public ObjectLockConfiguration getObjectLockConfiguration(GetObjectLockConfigurationArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+      throws MinioException {
     try {
-      return asyncClient.getObjectLockConfiguration(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.getObjectLockConfiguration(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return null;
     }
   }
@@ -1096,26 +855,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link SetObjectRetentionArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void setObjectRetention(SetObjectRetentionArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void setObjectRetention(SetObjectRetentionArgs args) throws MinioException {
     try {
-      asyncClient.setObjectRetention(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.setObjectRetention(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -1135,26 +881,13 @@ public class MinioClient implements AutoCloseable {
    *
    * @param args {@link GetObjectRetentionArgs} object.
    * @return {@link Retention} - Object retention configuration.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public Retention getObjectRetention(GetObjectRetentionArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public Retention getObjectRetention(GetObjectRetentionArgs args) throws MinioException {
     try {
-      return asyncClient.getObjectRetention(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.getObjectRetention(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return null;
     }
   }
@@ -1172,26 +905,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link EnableObjectLegalHoldArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void enableObjectLegalHold(EnableObjectLegalHoldArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void enableObjectLegalHold(EnableObjectLegalHoldArgs args) throws MinioException {
     try {
-      asyncClient.enableObjectLegalHold(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.enableObjectLegalHold(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -1208,26 +928,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link DisableObjectLegalHoldArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void disableObjectLegalHold(DisableObjectLegalHoldArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void disableObjectLegalHold(DisableObjectLegalHoldArgs args) throws MinioException {
     try {
-      asyncClient.disableObjectLegalHold(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.disableObjectLegalHold(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -1252,26 +959,13 @@ public class MinioClient implements AutoCloseable {
    * args {@link IsObjectLegalHoldEnabledArgs} object.
    *
    * @return boolean - True if legal hold is enabled.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public boolean isObjectLegalHoldEnabled(IsObjectLegalHoldEnabledArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public boolean isObjectLegalHoldEnabled(IsObjectLegalHoldEnabledArgs args) throws MinioException {
     try {
-      return asyncClient.isObjectLegalHoldEnabled(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.isObjectLegalHoldEnabled(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return false;
     }
   }
@@ -1284,26 +978,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link RemoveBucketArgs} bucket.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void removeBucket(RemoveBucketArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void removeBucket(RemoveBucketArgs args) throws MinioException {
     try {
-      asyncClient.removeBucket(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.removeBucket(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -1353,26 +1034,13 @@ public class MinioClient implements AutoCloseable {
    *
    * @param args {@link PutObjectArgs} object.
    * @return {@link ObjectWriteResponse} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public ObjectWriteResponse putObject(PutObjectArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public ObjectWriteResponse putObject(PutObjectArgs args) throws MinioException {
     try {
-      return asyncClient.putObject(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.putObject(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return null;
     }
   }
@@ -1398,26 +1066,13 @@ public class MinioClient implements AutoCloseable {
    *
    * @param args {@link UploadObjectArgs} object.
    * @return {@link ObjectWriteResponse} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public ObjectWriteResponse uploadObject(UploadObjectArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public ObjectWriteResponse uploadObject(UploadObjectArgs args) throws MinioException {
     try {
-      return asyncClient.uploadObject(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.uploadObject(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return null;
     }
   }
@@ -1432,27 +1087,13 @@ public class MinioClient implements AutoCloseable {
    *
    * @param args {@link GetBucketPolicyArgs} object.
    * @return String - Bucket policy configuration as JSON string.
-   * @throws BucketPolicyTooLargeException thrown to indicate returned bucket policy is too large.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public String getBucketPolicy(GetBucketPolicyArgs args)
-      throws BucketPolicyTooLargeException, ErrorResponseException, InsufficientDataException,
-          InternalException, InvalidKeyException, InvalidResponseException, IOException,
-          NoSuchAlgorithmException, ServerException, XmlParserException {
+  public String getBucketPolicy(GetBucketPolicyArgs args) throws MinioException {
     try {
-      return asyncClient.getBucketPolicy(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.getBucketPolicy(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return "";
     }
   }
@@ -1488,26 +1129,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link SetBucketPolicyArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void setBucketPolicy(SetBucketPolicyArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void setBucketPolicy(SetBucketPolicyArgs args) throws MinioException {
     try {
-      asyncClient.setBucketPolicy(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.setBucketPolicy(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -1519,26 +1147,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link DeleteBucketPolicyArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void deleteBucketPolicy(DeleteBucketPolicyArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void deleteBucketPolicy(DeleteBucketPolicyArgs args) throws MinioException {
     try {
-      asyncClient.deleteBucketPolicy(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.deleteBucketPolicy(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -1546,7 +1161,7 @@ public class MinioClient implements AutoCloseable {
    * Sets lifecycle configuration to a bucket.
    *
    * <pre>Example:{@code
-   * List<LifecycleRule> rules = new LinkedList<>();
+   * List<LifecycleRule> rules = new ArrayList<>();
    * rules.add(
    *     new LifecycleRule(
    *         Status.ENABLED,
@@ -1563,26 +1178,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link SetBucketLifecycleArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void setBucketLifecycle(SetBucketLifecycleArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void setBucketLifecycle(SetBucketLifecycleArgs args) throws MinioException {
     try {
-      asyncClient.setBucketLifecycle(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.setBucketLifecycle(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -1594,26 +1196,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link DeleteBucketLifecycleArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void deleteBucketLifecycle(DeleteBucketLifecycleArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void deleteBucketLifecycle(DeleteBucketLifecycleArgs args) throws MinioException {
     try {
-      asyncClient.deleteBucketLifecycle(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.deleteBucketLifecycle(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -1629,26 +1218,14 @@ public class MinioClient implements AutoCloseable {
    * @param args {@link GetBucketLifecycleArgs} object.
    * @return {@link LifecycleConfiguration} object.
    * @return String - Life cycle configuration as XML string.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
   public LifecycleConfiguration getBucketLifecycle(GetBucketLifecycleArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+      throws MinioException {
     try {
-      return asyncClient.getBucketLifecycle(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.getBucketLifecycle(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return null;
     }
   }
@@ -1664,26 +1241,14 @@ public class MinioClient implements AutoCloseable {
    *
    * @param args {@link GetBucketNotificationArgs} object.
    * @return {@link NotificationConfiguration} - Notification configuration.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
   public NotificationConfiguration getBucketNotification(GetBucketNotificationArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+      throws MinioException {
     try {
-      return asyncClient.getBucketNotification(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.getBucketNotification(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return null;
     }
   }
@@ -1692,7 +1257,7 @@ public class MinioClient implements AutoCloseable {
    * Sets notification configuration to a bucket.
    *
    * <pre>Example:{@code
-   * List<EventType> eventList = new LinkedList<>();
+   * List<EventType> eventList = new ArrayList<>();
    * eventList.add(EventType.OBJECT_CREATED_PUT);
    * eventList.add(EventType.OBJECT_CREATED_COPY);
    *
@@ -1702,7 +1267,7 @@ public class MinioClient implements AutoCloseable {
    * queueConfiguration.setPrefixRule("images");
    * queueConfiguration.setSuffixRule("pg");
    *
-   * List<QueueConfiguration> queueConfigurationList = new LinkedList<>();
+   * List<QueueConfiguration> queueConfigurationList = new ArrayList<>();
    * queueConfigurationList.add(queueConfiguration);
    *
    * NotificationConfiguration config = new NotificationConfiguration();
@@ -1713,26 +1278,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link SetBucketNotificationArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void setBucketNotification(SetBucketNotificationArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void setBucketNotification(SetBucketNotificationArgs args) throws MinioException {
     try {
-      asyncClient.setBucketNotification(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.setBucketNotification(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -1745,26 +1297,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link DeleteBucketNotificationArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void deleteBucketNotification(DeleteBucketNotificationArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void deleteBucketNotification(DeleteBucketNotificationArgs args) throws MinioException {
     try {
-      asyncClient.deleteBucketNotification(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.deleteBucketNotification(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -1779,26 +1318,14 @@ public class MinioClient implements AutoCloseable {
    *
    * @param args {@link GetBucketReplicationArgs} object.
    * @return {@link ReplicationConfiguration} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
   public ReplicationConfiguration getBucketReplication(GetBucketReplicationArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+      throws MinioException {
     try {
-      return asyncClient.getBucketReplication(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.getBucketReplication(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return null;
     }
   }
@@ -1824,7 +1351,7 @@ public class MinioClient implements AutoCloseable {
    *         null,
    *         Status.ENABLED);
    *
-   * List<ReplicationRule> rules = new LinkedList<>();
+   * List<ReplicationRule> rules = new ArrayList<>();
    * rules.add(rule);
    *
    * ReplicationConfiguration config =
@@ -1835,26 +1362,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link SetBucketReplicationArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void setBucketReplication(SetBucketReplicationArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void setBucketReplication(SetBucketReplicationArgs args) throws MinioException {
     try {
-      asyncClient.setBucketReplication(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.setBucketReplication(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -1867,26 +1381,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link DeleteBucketReplicationArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void deleteBucketReplication(DeleteBucketReplicationArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void deleteBucketReplication(DeleteBucketReplicationArgs args) throws MinioException {
     try {
-      asyncClient.deleteBucketReplication(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.deleteBucketReplication(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -1919,21 +1420,10 @@ public class MinioClient implements AutoCloseable {
    * @param args {@link ListenBucketNotificationArgs} object.
    * @return {@code CloseableIterator<Result<NotificationRecords>>} - Lazy closable iterator
    *     contains event records.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
   public CloseableIterator<Result<NotificationRecords>> listenBucketNotification(
-      ListenBucketNotificationArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+      ListenBucketNotificationArgs args) throws MinioException {
     return asyncClient.listenBucketNotification(args);
   }
 
@@ -1972,20 +1462,10 @@ public class MinioClient implements AutoCloseable {
    *
    * @param args instance of {@link SelectObjectContentArgs}
    * @return {@link SelectResponseStream} - Contains filtered records and progress.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
   public SelectResponseStream selectObjectContent(SelectObjectContentArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+      throws MinioException {
     return asyncClient.selectObjectContent(args);
   }
 
@@ -1998,26 +1478,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link SetBucketEncryptionArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void setBucketEncryption(SetBucketEncryptionArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void setBucketEncryption(SetBucketEncryptionArgs args) throws MinioException {
     try {
-      asyncClient.setBucketEncryption(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.setBucketEncryption(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -2032,26 +1499,13 @@ public class MinioClient implements AutoCloseable {
    *
    * @param args {@link GetBucketEncryptionArgs} object.
    * @return {@link SseConfiguration} - Server-side encryption configuration.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public SseConfiguration getBucketEncryption(GetBucketEncryptionArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public SseConfiguration getBucketEncryption(GetBucketEncryptionArgs args) throws MinioException {
     try {
-      return asyncClient.getBucketEncryption(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.getBucketEncryption(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return null;
     }
   }
@@ -2065,26 +1519,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link DeleteBucketEncryptionArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void deleteBucketEncryption(DeleteBucketEncryptionArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void deleteBucketEncryption(DeleteBucketEncryptionArgs args) throws MinioException {
     try {
-      asyncClient.deleteBucketEncryption(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.deleteBucketEncryption(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -2098,26 +1539,13 @@ public class MinioClient implements AutoCloseable {
    *
    * @param args {@link GetBucketTagsArgs} object.
    * @return {@link Tags} - Tags.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public Tags getBucketTags(GetBucketTagsArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public Tags getBucketTags(GetBucketTagsArgs args) throws MinioException {
     try {
-      return asyncClient.getBucketTags(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.getBucketTags(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return null;
     }
   }
@@ -2134,26 +1562,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link SetBucketTagsArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void setBucketTags(SetBucketTagsArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void setBucketTags(SetBucketTagsArgs args) throws MinioException {
     try {
-      asyncClient.setBucketTags(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.setBucketTags(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -2165,26 +1580,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link DeleteBucketTagsArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void deleteBucketTags(DeleteBucketTagsArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void deleteBucketTags(DeleteBucketTagsArgs args) throws MinioException {
     try {
-      asyncClient.deleteBucketTags(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.deleteBucketTags(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -2199,26 +1601,13 @@ public class MinioClient implements AutoCloseable {
    *
    * @param args {@link GetObjectTagsArgs} object.
    * @return {@link Tags} - Tags.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public Tags getObjectTags(GetObjectTagsArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public Tags getObjectTags(GetObjectTagsArgs args) throws MinioException {
     try {
-      return asyncClient.getObjectTags(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.getObjectTags(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return null;
     }
   }
@@ -2239,26 +1628,13 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link SetObjectTagsArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void setObjectTags(SetObjectTagsArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void setObjectTags(SetObjectTagsArgs args) throws MinioException {
     try {
-      asyncClient.setObjectTags(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.setObjectTags(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
     }
   }
 
@@ -2271,26 +1647,146 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link DeleteObjectTagsArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  public void deleteObjectTags(DeleteObjectTagsArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+  public void deleteObjectTags(DeleteObjectTagsArgs args) throws MinioException {
     try {
-      asyncClient.deleteObjectTags(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      asyncClient.deleteObjectTags(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
+    }
+  }
+
+  /**
+   * Gets CORS configuration of a bucket.
+   *
+   * <pre>Example:{@code
+   * CORSConfiguration config =
+   *     minioClient.getBucketCors(GetBucketCorsArgs.builder().bucket("my-bucketname").build());
+   * }</pre>
+   *
+   * @param args {@link GetBucketCorsArgs} object.
+   * @return {@link CORSConfiguration} - CORSConfiguration.
+   * @throws MinioException thrown to indicate SDK exception.
+   */
+  public CORSConfiguration getBucketCors(GetBucketCorsArgs args) throws MinioException {
+    try {
+      return asyncClient.getBucketCors(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
+      return null;
+    }
+  }
+
+  /**
+   * Sets CORS configuration to a bucket.
+   *
+   * <pre>Example:{@code
+   * CORSConfiguration config =
+   *     new CORSConfiguration(
+   *         Arrays.asList(
+   *             new CORSConfiguration.CORSRule[] {
+   *               // Rule 1
+   *               new CORSConfiguration.CORSRule(
+   *                   Arrays.asList(new String[] {"*"}), // Allowed headers
+   *                   Arrays.asList(new String[] {"PUT", "POST", "DELETE"}), // Allowed methods
+   *                   Arrays.asList(new String[] {"http://www.example.com"}), // Allowed origins
+   *                   Arrays.asList(
+   *                       new String[] {"x-amz-server-side-encryption"}), // Expose headers
+   *                   null, // ID
+   *                   3000), // Maximum age seconds
+   *               // Rule 2
+   *               new CORSConfiguration.CORSRule(
+   *                   null, // Allowed headers
+   *                   Arrays.asList(new String[] {"GET"}), // Allowed methods
+   *                   Arrays.asList(new String[] {"*"}), // Allowed origins
+   *                   null, // Expose headers
+   *                   null, // ID
+   *                   null // Maximum age seconds
+   *                   )
+   *             }));
+   * minioClient.setBucketCors(
+   *     SetBucketCorsArgs.builder().bucket("my-bucketname").config(config).build());
+   * }</pre>
+   *
+   * @param args {@link SetBucketCorsArgs} object.
+   * @throws MinioException thrown to indicate SDK exception.
+   */
+  public void setBucketCors(SetBucketCorsArgs args) throws MinioException {
+    try {
+      asyncClient.setBucketCors(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
+    }
+  }
+
+  /**
+   * Deletes CORS configuration of a bucket.
+   *
+   * <pre>Example:{@code
+   * minioClient.deleteBucketCors(DeleteBucketCorsArgs.builder().bucket("my-bucketname").build());
+   * }</pre>
+   *
+   * @param args {@link DeleteBucketCorsArgs} object.
+   * @throws MinioException thrown to indicate SDK exception.
+   */
+  public void deleteBucketCors(DeleteBucketCorsArgs args) throws MinioException {
+    try {
+      asyncClient.deleteBucketCors(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
+    }
+  }
+
+  /**
+   * Gets access control policy of an object.
+   *
+   * <pre>Example:{@code
+   * AccessControlPolicy policy =
+   *     minioClient.getObjectAcl(
+   *         GetObjectAclArgs.builder().bucket("my-bucketname").object("my-objectname").build());
+   * }</pre>
+   *
+   * @param args {@link GetObjectAclArgs} object.
+   * @return {@link AccessControlPolicy} - Access control policy object.
+   * @throws MinioException thrown to indicate SDK exception.
+   */
+  public AccessControlPolicy getObjectAcl(GetObjectAclArgs args) throws MinioException {
+    try {
+      return asyncClient.getObjectAcl(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
+      return null;
+    }
+  }
+
+  /**
+   * Gets attributes of an object.
+   *
+   * <pre>Example:{@code
+   * GetObjectAttributesResponse response =
+   *     minioClient.getObjectAttributes(
+   *         GetObjectAttributesArgs.builder()
+   *             .bucket("my-bucketname")
+   *             .object("my-objectname")
+   *             .objectAttributes(
+   *                 new String[] {
+   *                   "ETag", "Checksum", "ObjectParts", "StorageClass", "ObjectSize"
+   *                 })
+   *             .build());
+   * }</pre>
+   *
+   * @param args {@link GetObjectAttributesArgs} object.
+   * @return {@link GetObjectAttributesResponse} - Response object.
+   * @throws MinioException thrown to indicate SDK exception.
+   */
+  public GetObjectAttributesResponse getObjectAttributes(GetObjectAttributesArgs args)
+      throws MinioException {
+    try {
+      return asyncClient.getObjectAttributes(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
+      return null;
     }
   }
 
@@ -2318,26 +1814,79 @@ public class MinioClient implements AutoCloseable {
    * }</pre>
    *
    * @param args {@link UploadSnowballObjectsArgs} object.
-   * @throws ErrorResponseException thrown to indicate S3 service returned an error response.
-   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
-   * @throws InternalException thrown to indicate internal library error.
-   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
-   * @throws InvalidResponseException thrown to indicate S3 service returned invalid or no error
-   *     response.
-   * @throws IOException thrown to indicate I/O error on S3 operation.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
-   * @throws XmlParserException thrown to indicate XML parsing error.
+   * @throws MinioException thrown to indicate SDK exception.
    */
   public ObjectWriteResponse uploadSnowballObjects(UploadSnowballObjectsArgs args)
-      throws ErrorResponseException, InsufficientDataException, InternalException,
-          InvalidKeyException, InvalidResponseException, IOException, NoSuchAlgorithmException,
-          ServerException, XmlParserException {
+      throws MinioException {
     try {
-      return asyncClient.uploadSnowballObjects(args).get();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    } catch (ExecutionException e) {
-      asyncClient.throwEncapsulatedException(e);
+      return asyncClient.uploadSnowballObjects(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
+      return null;
+    }
+  }
+
+  /**
+   * Uploads multiple objects with same content from single stream with optional metadata and tags.
+   *
+   * <pre>Example:{@code
+   * Map<String, String> map = new HashMap<>();
+   * map.put("Project", "Project One");
+   * map.put("User", "jsmith");
+   * PutObjectFanOutResponse future =
+   *     minioClient.putObjectFanOut(
+   *         PutObjectFanOutArgs.builder().bucket("my-bucketname").stream(
+   *                 new ByteArrayInputStream("somedata".getBytes(StandardCharsets.UTF_8)), 8)
+   *             .entries(
+   *                 Arrays.asList(
+   *                     new PutObjectFanOutEntry[] {
+   *                       PutObjectFanOutEntry.builder().key("fan-out.0").build(),
+   *                       PutObjectFanOutEntry.builder().key("fan-out.1").tags(map).build()
+   *                     }))
+   *             .build());
+   * }</pre>
+   *
+   * @param args {@link PutObjectFanOutArgs} object.
+   * @return {@link PutObjectFanOutResponse} object.
+   * @throws MinioException thrown to indicate SDK exception.
+   */
+  public PutObjectFanOutResponse putObjectFanOut(PutObjectFanOutArgs args) throws MinioException {
+    try {
+      return asyncClient.putObjectFanOut(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
+      return null;
+    }
+  }
+
+  /**
+   * Performs language model inference with the prompt and referenced object as context.
+   *
+   * @param args {@link PromptObjectArgs} object.
+   * @return {@link PromptObjectResponse} object.
+   * @throws MinioException thrown to indicate SDK exception.
+   */
+  public PromptObjectResponse promptObject(PromptObjectArgs args) throws MinioException {
+    try {
+      return asyncClient.promptObject(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
+      return null;
+    }
+  }
+
+  /**
+   * Appends from a file, stream or data to existing object in a bucket.
+   *
+   * @param args {@link AppendObjectArgs} object.
+   * @return {@link ObjectWriteResponse} object.
+   * @throws MinioException thrown to indicate SDK exception.
+   */
+  public ObjectWriteResponse appendObject(AppendObjectArgs args) throws MinioException {
+    try {
+      return asyncClient.appendObject(args).join();
+    } catch (CompletionException e) {
+      asyncClient.throwMinioException(e);
       return null;
     }
   }
@@ -2366,11 +1915,12 @@ public class MinioClient implements AutoCloseable {
    * minioClient.ignoreCertCheck();
    * }</pre>
    *
-   * @throws KeyManagementException thrown to indicate key management error.
-   * @throws NoSuchAlgorithmException thrown to indicate missing of SSL library.
+   * @throws MinioException thrown to indicate SDK exception.
    */
-  @SuppressFBWarnings(value = "SIC", justification = "Should not be used in production anyways.")
-  public void ignoreCertCheck() throws KeyManagementException, NoSuchAlgorithmException {
+  @edu.umd.cs.findbugs.annotations.SuppressFBWarnings(
+      value = "SIC",
+      justification = "Should not be used in production anyways.")
+  public void ignoreCertCheck() throws MinioException {
     asyncClient.ignoreCertCheck();
   }
 
@@ -2399,30 +1949,9 @@ public class MinioClient implements AutoCloseable {
    * Disables HTTP call tracing previously enabled.
    *
    * @see #traceOn
-   * @throws IOException upon connection error
    */
-  public void traceOff() throws IOException {
+  public void traceOff() {
     asyncClient.traceOff();
-  }
-
-  /**
-   * Enables accelerate endpoint for Amazon S3 endpoint.
-   *
-   * @deprecated This method is no longer supported.
-   */
-  @Deprecated
-  public void enableAccelerateEndpoint() {
-    asyncClient.enableAccelerateEndpoint();
-  }
-
-  /**
-   * Disables accelerate endpoint for Amazon S3 endpoint.
-   *
-   * @deprecated This method is no longer supported.
-   */
-  @Deprecated
-  public void disableAccelerateEndpoint() {
-    asyncClient.disableAccelerateEndpoint();
   }
 
   /** Enables dual-stack endpoint for Amazon S3 endpoint. */
@@ -2450,13 +1979,13 @@ public class MinioClient implements AutoCloseable {
     asyncClient.setAwsS3Prefix(awsS3Prefix);
   }
 
+  /** Closes underneath async client. */
   @Override
   public void close() throws Exception {
-    if (asyncClient != null) {
-      asyncClient.close();
-    }
+    if (asyncClient != null) asyncClient.close();
   }
 
+  /** Creates new {@link MinioClient.Builder}. */
   public static Builder builder() {
     return new Builder();
   }
@@ -2506,6 +2035,11 @@ public class MinioClient implements AutoCloseable {
 
     public Builder httpClient(OkHttpClient httpClient) {
       asyncClientBuilder.httpClient(httpClient);
+      return this;
+    }
+
+    public Builder httpClient(OkHttpClient httpClient, boolean close) {
+      asyncClientBuilder.httpClient(httpClient, close);
       return this;
     }
 

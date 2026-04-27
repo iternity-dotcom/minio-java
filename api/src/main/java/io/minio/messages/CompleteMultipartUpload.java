@@ -16,15 +16,17 @@
 
 package io.minio.messages;
 
+import io.minio.Utils;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
+import javax.annotation.Nonnull;
 import org.simpleframework.xml.ElementList;
 import org.simpleframework.xml.Namespace;
 import org.simpleframework.xml.Root;
 
 /**
- * Object representation of request XML of <a
+ * Request XML of <a
  * href="https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html">CompleteMultipartUpload
  * API</a>.
  */
@@ -33,14 +35,13 @@ import org.simpleframework.xml.Root;
 @edu.umd.cs.findbugs.annotations.SuppressFBWarnings(value = "URF_UNREAD_FIELD")
 public class CompleteMultipartUpload {
   @ElementList(name = "Part", inline = true)
-  private List<Part> partList;
+  private List<Part> parts;
 
-  /** Constucts a new CompleteMultipartUpload object with given parts. */
-  public CompleteMultipartUpload(Part[] parts) throws IllegalArgumentException {
-    if (parts == null || parts.length == 0) {
-      throw new IllegalArgumentException("null or empty parts");
+  /** Constructs a new CompleteMultipartUpload object with given parts. */
+  public CompleteMultipartUpload(@Nonnull Part[] parts) {
+    if (Objects.requireNonNull(parts, "parts must not be null").length == 0) {
+      throw new IllegalArgumentException("parts cannot be empty");
     }
-
-    this.partList = Collections.unmodifiableList(Arrays.asList(parts));
+    this.parts = Utils.unmodifiableList(Arrays.asList(parts));
   }
 }

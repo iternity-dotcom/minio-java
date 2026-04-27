@@ -14,40 +14,38 @@
  * limitations under the License.
  */
 
+import io.minio.ListBucketsArgs;
 import io.minio.MinioClient;
+import io.minio.Result;
 import io.minio.errors.MinioException;
-import io.minio.messages.Bucket;
-import java.io.IOException;
-import java.security.InvalidKeyException;
-import java.security.NoSuchAlgorithmException;
-import java.util.List;
+import io.minio.messages.ListAllMyBucketsResult;
 
 public class ListBuckets {
   /** MinioClient.listBuckets() example. */
-  public static void main(String[] args)
-      throws IOException, NoSuchAlgorithmException, InvalidKeyException {
-    try {
-      /* play.min.io for test and development. */
-      MinioClient minioClient =
-          MinioClient.builder()
-              .endpoint("https://play.min.io")
-              .credentials("Q3AM3UQ867SPQQA43P2F", "zuf+tfteSlswRu7BJ86wekitnifILbZam1KYY3TG")
-              .build();
+  public static void main(String[] args) throws MinioException {
+    /* play.min.io for test and development. */
+    MinioClient minioClient =
+        MinioClient.builder()
+            .endpoint("https://play.min.io")
+            .credentials("Q3AM3UQ867SPQQA43P2F", "zuf+tfteSlswRu7BJ86wekitnifILbZam1KYY3TG")
+            .build();
 
-      /* Amazon S3: */
-      // MinioClient minioClient =
-      //     MinioClient.builder()
-      //         .endpoint("https://s3.amazonaws.com")
-      //         .credentials("YOUR-ACCESSKEY", "YOUR-SECRETACCESSKEY")
-      //         .build();
+    /* Amazon S3: */
+    // MinioClient minioClient =
+    //     MinioClient.builder()
+    //         .endpoint("https://s3.amazonaws.com")
+    //         .credentials("YOUR-ACCESSKEY", "YOUR-SECRETACCESSKEY")
+    //         .build();
 
-      // List buckets we have atleast read access.
-      List<Bucket> bucketList = minioClient.listBuckets();
-      for (Bucket bucket : bucketList) {
-        System.out.println(bucket.creationDate() + ", " + bucket.name());
-      }
-    } catch (MinioException e) {
-      System.out.println("Error occurred: " + e);
+    // List buckets we have at least read access.
+    Iterable<Result<ListAllMyBucketsResult.Bucket>> results =
+        minioClient.listBuckets(ListBucketsArgs.builder().build());
+    for (Result<ListAllMyBucketsResult.Bucket> result : results) {
+      ListAllMyBucketsResult.Bucket bucket = result.get();
+      System.out.println(
+          String.format(
+              "Bucket: %s, Region: %s, CreationDate: %s",
+              bucket.name(), bucket.bucketRegion(), bucket.creationDate()));
     }
   }
 }
